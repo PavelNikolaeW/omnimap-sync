@@ -27,11 +27,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Проверяем JWT
     is_valid = await verify_jwt(token)
-    if not is_valid:
-        await websocket.send_json({"type": "error", "message": "Invalid token."})
-        await websocket.close(code=1008)
-        logger.warning("Connection attempt with invalid token")
-        return
 
     try:
         # Если подпись не нужно проверять, options={"verify_signature": False}
@@ -44,8 +39,7 @@ async def websocket_endpoint(websocket: WebSocket):
         user_id = jwt_data.get('user_id')
     except Exception as e:
         await websocket.send_json({"type": "error", "message": "Invalid token data."})
-        await websocket.close(code=1008)
-        return
+        user_id = settings.ANONIM_USER
 
     if not user_id:
         await websocket.send_json({"type": "error", "message": "user_id is missing in token."})

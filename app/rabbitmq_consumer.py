@@ -29,7 +29,6 @@ async def action_update_block(message: dict):
         logger.exception(f"Failed to save block data for block_uuid={block_uuid}")
         return
 
-
     # Рассылаем обновление подписанным клиентам
     try:
         subscribers = await redis.smembers(f"block:{block_uuid}")
@@ -37,16 +36,11 @@ async def action_update_block(message: dict):
         if not subscribers:
             logger.debug(f"No subscribers found for block_uuid={block_uuid}")
             return
-        tasks = [asyncio.create_task(
-            connection_manager.send_personal_message(
-                {
+        tasks = connection_manager.get_tasks_send_message({
                     "type": "block_update",
                     "block_uuid": block_uuid,
                     "data": block_data
-                },
-                str(connection_id),
-            )
-        ) for connection_id in subscribers]
+                }, subscribers)
 
         if tasks:
             await asyncio.gather(*tasks)
@@ -170,7 +164,7 @@ async def consume():
     Настраивает соединение с RabbitMQ и начинает потребление сообщений.
     """
     try:
-        connection: RobustConnection = await connect_robust(settings.rabbitmq_url)
+        connection: RobustConnection = await connect_robust(settings.rabbitmq_url, heartbeat=60)
         channel: RobustChannel = await connection.channel()
 
         # Устанавливаем очередь
@@ -178,9 +172,13 @@ async def consume():
         await queue.consume(handle_message, no_ack=False)
 
         logger.info(f"Waiting for messages from {settings.queue_name}")
+
         return connection
     except exceptions.AMQPConnectionError as e:
         logger.error(f"RabbitMQ connection error: {e}")
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error while setting up consumer: {e}")
         raise
 
 
@@ -190,13 +188,21 @@ async def start_consumer():
     Если соединение с RabbitMQ теряется, пытаемся переподключиться через 5 секунд.
     """
     while True:
+        connection = None
         try:
-            connection = await consume()
-            # Ждём закрытия соединения, чтобы затем переподключиться
-            await connection.closed()
-        except exceptions.AMQPConnectionError:
-            logger.error("Lost connection to RabbitMQ. Retrying in 5 seconds...")
+            connection = await consume()  # Устанавливаем соединение и начинаем потребление
+            logger.info("Connection established. Waiting for messages...")
+
+            # Ждем, пока соединение явно не закроется
+            await asyncio.sleep(float('inf'))  # Бесконечное ожидание, пока соединение активно
+        except asyncio.CancelledError:
+            logger.info("Consumer task cancelled. Exiting...")
+            if connection and not connection.is_closed:
+                await connection.close()
+            break
+        except exceptions.AMQPConnectionError as e:
+            logger.error(f"Lost connection to RabbitMQ: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
         except Exception as e:
-            logger.exception(f"Unexpected error in consumer: {e}")
+            logger.exception(f"Unexpected error in consumer loop: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)

@@ -41,6 +41,16 @@ async def shutdown_event():
             await rabbitmq_consumer_task
         except asyncio.CancelledError:
             logger.info("RabbitMQ consumer task cancelled successfully.")
+        except Exception as e:
+            logger.error(f"Error while cancelling RabbitMQ consumer task: {e}")
+
+    # Закрытие всех открытых соединений
+    try:
+        connection = await connect_robust(settings.rabbitmq_url)
+        await connection.close()
+        logger.info("RabbitMQ connection closed successfully.")
+    except Exception as e:
+        logger.error(f"Error while closing RabbitMQ connection: {e}")
 
 
 @app.on_event("startup")

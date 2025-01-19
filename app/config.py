@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     jwt_algorithms: str = "HS256"
     jwt_secret_key: t.Optional[str] = None
     block_portion: int = 500
+    ANONIM_USER: int = -1
     FORBIDDEN_BLOCK: dict = {'id': '',
                              'title': 'block 403 forbidden',
                              'children': json.dumps([]),
