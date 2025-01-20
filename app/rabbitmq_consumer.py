@@ -36,14 +36,13 @@ async def action_update_block(message: dict):
         if not subscribers:
             logger.debug(f"No subscribers found for block_uuid={block_uuid}")
             return
-        tasks = connection_manager.get_tasks_send_message({
+
+        await connection_manager.send_message_to_subscribers({
                     "type": "block_update",
                     "block_uuid": block_uuid,
                     "data": block_data
                 }, subscribers)
 
-        if tasks:
-            await asyncio.gather(*tasks)
         logger.info(f"Processed update_block for block_uuid={block_uuid}")
     except Exception:
         logger.exception(f"Failed to notify subscribers for block_uuid={block_uuid}")

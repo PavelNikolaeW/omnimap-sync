@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     jwt_secret_key: t.Optional[str] = None
     block_portion: int = 500
     ANONIM_USER: int = -1
+    MAX_CONCURRENT_SENDS: int = 10
     FORBIDDEN_BLOCK: dict = {'id': '',
                              'title': 'block 403 forbidden',
                              'children': json.dumps([]),
