@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
     queue_name: str = 'block_update'
-    auth_service_url: str = "http://127.0.0.1:8000/api/v1/token/verify/"
+    auth_service_url: str = "https://localhost:8080/api/v1/token/verify/"
     secret_key: str = "secret_key"
     jwt_algorithms: str = "HS256"
     jwt_secret_key: t.Optional[str] = None

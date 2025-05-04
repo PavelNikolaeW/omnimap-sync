@@ -147,7 +147,6 @@ async def handle_message(message: IncomingMessage):
         except json.JSONDecodeError:
             logger.error("Failed to decode JSON message")
             return
-
         action = message_data.get('action')
         if action == 'update_block':
             await action_update_block(message_data)
