@@ -113,11 +113,15 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
 
     # 3. Фильтруем входной список blocks, оставляем только те, на которые подписан пользователь
     #    и сразу сохраним клиентское updated_at для каждого блока
-    valid_blocks_dict = {}
+    valid_blocks_dict = {}  # подписанные
+    unsubscribed_blocks = []  # неподписанные
+
     for block in blocks:
         block_id = block.get('id')
         if block_id in subscribed_blocks:
             valid_blocks_dict[block_id] = block.get('updated_at', 0)
+        elif block_id:
+            unsubscribed_blocks.append(block_id)
 
     if not valid_blocks_dict:
         await websocket.send_json({"type": "block_updates", "updates": []})
@@ -130,7 +134,7 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
     total_ids = len(valid_block_ids)
 
     logger.debug(
-        f"User {connection_id} is requesting updates for {total_ids} blocks. "
+        f"User {connection_id} is requesting updates for {total_ids} subscribed blocks. "
         f"Using chunk size = {block_portion}"
     )
 
@@ -162,6 +166,9 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
                     updated_blocks_data.append(decoded_data)
             except ValueError as e:
                 logger.exception(f"Error parsing updated_at for block {block_id}: {e}")
+    # Добавим пометки об удалённых блоках (неподписанных)
+    for block_id in unsubscribed_blocks:
+        updated_blocks_data.append({"id": block_id, "deleted": True})
 
     # 7. Формируем ответ
     response = {
@@ -170,6 +177,6 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
     }
     await websocket.send_json(response)
     logger.info(
-        f"Sent block updates to {connection_id}: {len(updated_blocks_data)} updated blocks "
-        f"out of {len(valid_blocks_dict)} requested."
+        f"Sent block updates to {connection_id}: {len(updated_blocks_data)} total blocks "
+        f"({len(valid_blocks_dict)} subscribed, {len(unsubscribed_blocks)} deleted)"
     )

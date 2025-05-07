@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+from collections import defaultdict
 
 from aio_pika import connect_robust, IncomingMessage, RobustChannel, RobustConnection, exceptions
 from app.config import settings
@@ -37,10 +38,10 @@ async def action_update_block(message: dict):
             return
 
         await connection_manager.send_message_to_subscribers({
-                    "type": "block_update",
-                    "block_uuid": block_uuid,
-                    "data": block_data
-                }, subscribers)
+            "type": "block_update",
+            "block_uuid": block_uuid,
+            "data": block_data
+        }, subscribers)
 
         logger.info(f"Processed update_block for block_uuid={block_uuid}")
     except Exception:
@@ -137,6 +138,55 @@ async def action_subscribe(message: dict):
         logger.exception("Failed to subscribe users to blocks in Redis")
 
 
+async def action_unsubscribe(message: dict):
+    """
+    Обрабатывает отписку от списка блоков.
+    Удаляет блок из всех подписок пользователей и удаляет сам блок из Redis.
+    message = {
+        "block_uuids": ["uuid1", "uuid2", ...]
+    }
+    """
+    try:
+        block_uuids = message["block_uuids"]
+    except KeyError as e:
+        logger.error(f"Missing required key in message: {e}")
+        return
+
+    redis = await get_redis_pool()
+    block_portion = settings.block_portion
+
+    try:
+        for i in range(0, len(block_uuids), block_portion):
+            chunk = block_uuids[i:i + block_portion]
+
+            # Получаем всех подписчиков по блокам в одном пайплайне
+            pipe = redis.pipeline()
+            for block_uuid in chunk:
+                pipe.smembers(f"block:{block_uuid}")
+            results = await pipe.execute()
+
+            # Формируем словарь user_id -> set(block_uuid)
+            user_blocks = defaultdict(set)
+            for block_uuid, user_ids in zip(chunk, results):
+                for user_id in user_ids:
+                    user_blocks[user_id].add(block_uuid)
+
+            # Удаляем block_uuid из подписок пользователей
+            pipe = redis.pipeline(transaction=True)
+            for user_id, blocks in user_blocks.items():
+                pipe.srem(f"subscriber:{user_id}:blocks", *blocks)
+
+            # Удаляем ключи блоков и данных
+            pipe.delete(*[f"block:{uuid}" for uuid in chunk])
+            pipe.delete(*[f"blockdata:{uuid}" for uuid in chunk])
+
+            await pipe.execute()
+
+        logger.info(f"Successfully unsubscribed and cleaned up for blocks: {len(block_uuids)}")
+    except Exception:
+        logger.exception("Failed to process unsubscribe action")
+
+
 async def handle_message(message: IncomingMessage):
     """
     Обрабатывает входящие сообщения RabbitMQ.
@@ -154,6 +204,8 @@ async def handle_message(message: IncomingMessage):
             await action_update_access(message_data)
         elif action == 'subscribe':
             await action_subscribe(message_data)
+        elif action == 'unsubscribe':
+            await action_unsubscribe(message_data)
         else:
             logger.warning(f"Unknown action received: {action}")
 
