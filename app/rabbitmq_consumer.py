@@ -48,6 +48,76 @@ async def action_update_block(message: dict):
         logger.exception(f"Failed to notify subscribers for block_uuid={block_uuid}")
 
 
+async def action_update_blocks(message: dict):
+    """
+    TODO проверить как работает
+    Обрабатывает пакетное обновление нескольких блоков.
+
+    Формат message:
+    {
+        "blocks": {
+            "<uuid>": {...},   # block_data (словарь полей блока)
+            ...
+        }
+    }
+    """
+    try:
+        blocks = message["blocks"]
+        if not isinstance(blocks, dict):
+            raise TypeError("'blocks' must be a dict mapping uuid -> block_data")
+    except (KeyError, TypeError) as exc:
+        logger.error(f"Invalid 'blocks' in message: {exc}")
+        return
+
+    redis = await get_redis_pool()
+
+    # --- 1. Сохраняем данные блоков -------------------------------------------------
+    try:
+        async with redis.pipeline(transaction=True) as pipe:
+            for block_uuid, block_data in blocks.items():
+                if not isinstance(block_data, dict):
+                    logger.error(f"block_data for {block_uuid} is not a dict")
+                    continue
+                await pipe.hset(f"blockdata:{block_uuid}", mapping=block_data)
+            await pipe.execute()
+    except Exception:
+        logger.exception("Failed to save block data for batch update")
+        return
+
+    # --- 2. Собираем подписчиков и рассылаем уведомления ----------------------------
+    try:
+        subscribers_by_block: dict[str, set[str]] = {}
+
+        if blocks:
+            async with redis.pipeline(transaction=True) as pipe:
+                for block_uuid in blocks.keys():
+                    pipe.smembers(f"block:{block_uuid}")
+                subscribers_lists = await pipe.execute()
+
+            for block_uuid, subs in zip(blocks.keys(), subscribers_lists):
+                if subs:
+                    subscribers_by_block[block_uuid] = subs
+
+        for block_uuid, block_data in blocks.items():
+            subs = subscribers_by_block.get(block_uuid)
+            if not subs:
+                logger.debug(f"No subscribers for block_uuid={block_uuid}")
+                continue
+
+            await connection_manager.send_message_to_subscribers(
+                {
+                    "type": "block_update",
+                    "block_uuid": block_uuid,
+                    "data": block_data,
+                },
+                subs,
+            )
+
+        logger.info(f"Processed update_blocks for {len(blocks)} blocks")
+    except Exception:
+        logger.exception("Failed to notify subscribers during batch update")
+
+
 async def send_message_update_access(start_block_ids, block_uuids, user_id, permission, redis):
     if permission == "deny":
         data_list = [{**settings.FORBIDDEN_BLOCK, 'id': block_id} for block_id in start_block_ids]
@@ -200,6 +270,8 @@ async def handle_message(message: IncomingMessage):
         action = message_data.get('action')
         if action == 'update_block':
             await action_update_block(message_data)
+        elif action == 'update_blocks':
+            await action_update_blocks(message_data)
         elif action == 'update_access':
             await action_update_access(message_data)
         elif action == 'subscribe':
