@@ -1,13 +1,16 @@
 # app/websockets.py
+"""WebSocket endpoint for real-time block updates."""
 
 import json
 import logging
-import jwt
+from typing import Any
 
+import jwt
 from fastapi import WebSocket, WebSocketDisconnect
 
-from app.conection_manager import ConnectionManager
+from app.connection_manager import ConnectionManager
 from app.config import settings
+from app.models import ErrorResponse, BlockUpdatesResponse
 from app.redis_client import get_redis_pool
 from app.auth import verify_jwt
 
@@ -16,105 +19,134 @@ logger = logging.getLogger("realtime_service")
 connection_manager = ConnectionManager()
 
 
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket) -> None:
+    """
+    Main WebSocket endpoint for client connections.
+
+    Authentication flow:
+    1. Verify JWT with external auth service
+    2. Decode and validate JWT locally
+    3. Validate user_id exists in token
+    4. Connect user and handle message loop
+    """
     await websocket.accept()
     token = websocket.query_params.get("token")
+
     if not token:
-        await websocket.send_json({"type": "error", "message": "Token is required."})
+        await websocket.send_json(ErrorResponse(message="Token is required.").model_dump())
         await websocket.close(code=1008)
         logger.warning("Connection attempt without token")
         return
 
-    # Проверяем JWT
+    # Step 1: Verify JWT with external auth service
     is_valid = await verify_jwt(token)
+    if not is_valid:
+        await websocket.send_json(ErrorResponse(message="Token verification failed.").model_dump())
+        await websocket.close(code=1008)
+        logger.warning("Connection attempt with invalid token (auth service rejected)")
+        return
 
+    # Step 2: Decode and validate JWT locally
     try:
-        # Если подпись не нужно проверять, options={"verify_signature": False}
         jwt_data = jwt.decode(
             token,
             key=settings.jwt_secret_key,
             algorithms=settings.jwt_algorithms.split(','),
-            options={"verify_signature": False}
+            options={"verify_signature": True}
         )
         user_id = jwt_data.get('user_id')
-    except Exception as e:
-        await websocket.send_json({"type": "error", "message": "Invalid token data."})
-        user_id = settings.ANONIM_USER
-
-    if not user_id:
-        await websocket.send_json({"type": "error", "message": "user_id is missing in token."})
+    except jwt.ExpiredSignatureError:
+        await websocket.send_json(ErrorResponse(message="Token has expired.").model_dump())
         await websocket.close(code=1008)
+        logger.warning("Connection attempt with expired token")
+        return
+    except jwt.InvalidTokenError as e:
+        await websocket.send_json(ErrorResponse(message="Invalid token.").model_dump())
+        await websocket.close(code=1008)
+        logger.warning(f"Connection attempt with invalid token: {e}")
+        return
+
+    # Step 3: Validate user_id exists in token
+    if not user_id:
+        await websocket.send_json(ErrorResponse(message="user_id is missing in token.").model_dump())
+        await websocket.close(code=1008)
+        logger.warning("Connection attempt with token missing user_id")
         return
 
     connection_id = str(user_id)
     await connection_manager.connect(connection_id, websocket)
+    logger.info(f"User {connection_id} authenticated and connected")
 
     try:
         while True:
-            message = None
+            message: str | None = None
             try:
                 message = await websocket.receive_text()
             except WebSocketDisconnect:
                 logger.info(f"Connection {connection_id} disconnected (WebSocketDisconnect)")
                 break
-            except Exception as e:
+            except Exception:
                 logger.exception(f"Error receiving message from {connection_id}")
                 break
 
             if message is None:
                 continue
 
-            # Разбираем входящую строку как JSON
+            # Parse incoming JSON message
             try:
-                data = json.loads(message)
+                data: dict[str, Any] = json.loads(message)
             except json.JSONDecodeError:
                 logger.warning(f"Received invalid JSON from {connection_id}")
-                await websocket.send_json({"type": "error", "message": "Invalid JSON format."})
+                await websocket.send_json(ErrorResponse(message="Invalid JSON format.").model_dump())
                 continue
 
             action = data.get("action")
             blocks = data.get("blocks", [])
+
             if action == "get_updates":
                 await handle_get_updates(websocket, connection_id, blocks)
             else:
                 logger.warning(f"Connection {connection_id} sent unknown action: {action}")
-                await websocket.send_json({"type": "error", "message": "Unknown action."})
+                await websocket.send_json(ErrorResponse(message="Unknown action.").model_dump())
 
     finally:
-        # В любом случае (исключение или разрыв) отключаем
         await connection_manager.disconnect(connection_id, websocket)
 
 
-async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: list):
+async def handle_get_updates(
+    websocket: WebSocket,
+    connection_id: str,
+    blocks: list[dict[str, Any]]
+) -> None:
     """
-    Обрабатывает запрос клиента на получение обновлений для списка блоков.
-    Использует ключ subscriber:{user_id}:blocks для валидации подписки.
+    Handle client request for block updates.
+
+    Validates user subscription and returns blocks that have been
+    updated since the client's last known timestamp.
     """
     logger.debug(f'Get updates request from {connection_id}: blocks count = {len(blocks)}')
 
-    # 1. Проверяем, что blocks — это список
+    # Validate blocks is a list
     if not isinstance(blocks, list):
-        await websocket.send_json({
-            "type": "error",
-            "message": "`blocks` must be a list."
-        })
+        await websocket.send_json(ErrorResponse(message="`blocks` must be a list.").model_dump())
         logger.warning(f"Invalid blocks format from {connection_id}")
         return
 
     redis = await get_redis_pool()
 
-    # 2. Получаем из Redis идентификаторы блоков, на которые подписан пользователь
+    # Get user's subscribed block IDs from Redis
     subscriber_key = f"subscriber:{connection_id}:blocks"
-    subscribed_blocks = await redis.smembers(subscriber_key)
+    subscribed_blocks: set[str] = await redis.smembers(subscriber_key)
+
     if not subscribed_blocks:
-        await websocket.send_json({"type": "block_updates", "updates": []})
+        response = BlockUpdatesResponse(updates=[])
+        await websocket.send_json(response.model_dump())
         logger.info(f"No subscribed blocks found for user {connection_id}")
         return
 
-    # 3. Фильтруем входной список blocks, оставляем только те, на которые подписан пользователь
-    #    и сразу сохраним клиентское updated_at для каждого блока
-    valid_blocks_dict = {}  # подписанные
-    unsubscribed_blocks = []  # неподписанные
+    # Filter input blocks: keep only subscribed ones, track client's updated_at
+    valid_blocks_dict: dict[str, int] = {}  # subscribed blocks
+    unsubscribed_blocks: list[str] = []  # not subscribed
 
     for block in blocks:
         block_id = block.get('id')
@@ -124,12 +156,13 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
             unsubscribed_blocks.append(block_id)
 
     if not valid_blocks_dict:
-        await websocket.send_json({"type": "block_updates", "updates": []})
+        response = BlockUpdatesResponse(updates=[])
+        await websocket.send_json(response.model_dump())
         logger.info(f"User {connection_id} requested updates for blocks not subscribed.")
         return
 
-    # 4. Готовимся к пакетной (chunk) загрузке из Redis
-    block_portion = settings.block_portion  # читаем размер чанка из настроек
+    # Batch load from Redis using chunks
+    block_portion = settings.block_portion
     valid_block_ids = list(valid_blocks_dict.keys())
     total_ids = len(valid_block_ids)
 
@@ -138,20 +171,19 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
         f"Using chunk size = {block_portion}"
     )
 
-    updated_blocks_data = []
+    updated_blocks_data: list[dict[str, Any]] = []
 
     for start_idx in range(0, total_ids, block_portion):
         chunk_block_ids = valid_block_ids[start_idx: start_idx + block_portion]
 
-        # Создаём pipeline для чанка
+        # Create pipeline for chunk
         async with redis.pipeline(transaction=False) as pipe:
             for block_id in chunk_block_ids:
                 pipe.hgetall(f"blockdata:{block_id}")
             redis_results = await pipe.execute()
 
-        # 6. Обрабатываем результаты этого чанка
+        # Process chunk results
         for block_id, redis_data in zip(chunk_block_ids, redis_results):
-            # Если блок в Redis не найден, пропускаем
             if not redis_data:
                 continue
 
@@ -159,23 +191,19 @@ async def handle_get_updates(websocket: WebSocket, connection_id: str, blocks: l
                 redis_time = int(redis_data.get("updated_at", 0))
                 client_time = valid_blocks_dict[block_id]
                 if redis_time > client_time:
-                    decoded_data = {
-                        k: v
-                        for k, v in redis_data.items()
-                    }
+                    decoded_data = {k: v for k, v in redis_data.items()}
                     updated_blocks_data.append(decoded_data)
             except ValueError as e:
                 logger.exception(f"Error parsing updated_at for block {block_id}: {e}")
-    # Добавим пометки об удалённых блоках (неподписанных)
+
+    # Mark unsubscribed blocks as deleted
     for block_id in unsubscribed_blocks:
         updated_blocks_data.append({"id": block_id, "deleted": True})
 
-    # 7. Формируем ответ
-    response = {
-        "type": "block_updates",
-        "updates": updated_blocks_data
-    }
-    await websocket.send_json(response)
+    # Send response
+    response = BlockUpdatesResponse(updates=updated_blocks_data)
+    await websocket.send_json(response.model_dump())
+
     logger.info(
         f"Sent block updates to {connection_id}: {len(updated_blocks_data)} total blocks "
         f"({len(valid_blocks_dict)} subscribed, {len(unsubscribed_blocks)} deleted)"
