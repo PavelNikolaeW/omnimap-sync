@@ -26,9 +26,12 @@ class Settings(BaseSettings):
 
     # Message queue configuration
     queue_name: str = 'block_update'
+    exchange_name: str = 'block_update'
+    exchange_type: str = 'direct'  # direct, fanout, topic, headers
+    routing_key: str = 'block_update'
 
     # Authentication settings
-    auth_service_url: str = "https://localhost:8080/api/v1/token/verify/"
+    auth_service_url: str = "http://localhost:8000/api/v1/token/verify/"
     jwt_algorithms: str = "HS256"
     jwt_secret_key: str = ""  # Required in production, validated below
 

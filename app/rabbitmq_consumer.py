@@ -7,7 +7,7 @@ import logging
 from collections import defaultdict
 from typing import Any
 
-from aio_pika import connect_robust, IncomingMessage, RobustChannel, RobustConnection, exceptions
+from aio_pika import connect_robust, IncomingMessage, RobustChannel, RobustConnection, ExchangeType, exceptions
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
@@ -339,17 +339,44 @@ async def handle_message(message: IncomingMessage) -> None:
         await message.reject(requeue=False)
 
 
+def _get_exchange_type(type_str: str) -> ExchangeType:
+    """Convert string exchange type to ExchangeType enum."""
+    mapping = {
+        'direct': ExchangeType.DIRECT,
+        'fanout': ExchangeType.FANOUT,
+        'topic': ExchangeType.TOPIC,
+        'headers': ExchangeType.HEADERS,
+    }
+    return mapping.get(type_str.lower(), ExchangeType.DIRECT)
+
+
 async def consume() -> RobustConnection:
     """
     Set up RabbitMQ connection and start consuming messages.
 
+    Automatically creates exchange, queue, and binding if they don't exist.
     Returns the connection for lifecycle management.
     """
     try:
         connection: RobustConnection = await connect_robust(settings.rabbitmq_url, heartbeat=60)
         channel: RobustChannel = await connection.channel()
 
+        # Declare exchange (creates if not exists)
+        exchange = await channel.declare_exchange(
+            settings.exchange_name,
+            type=_get_exchange_type(settings.exchange_type),
+            durable=True,
+        )
+        logger.info(f"Exchange '{settings.exchange_name}' declared (type: {settings.exchange_type})")
+
+        # Declare queue (creates if not exists)
         queue = await channel.declare_queue(settings.queue_name, durable=True)
+        logger.info(f"Queue '{settings.queue_name}' declared")
+
+        # Bind queue to exchange with routing key
+        await queue.bind(exchange, routing_key=settings.routing_key)
+        logger.info(f"Queue '{settings.queue_name}' bound to exchange '{settings.exchange_name}' with routing_key '{settings.routing_key}'")
+
         await queue.consume(handle_message, no_ack=False)
 
         logger.info(f"Waiting for messages from {settings.queue_name}")
