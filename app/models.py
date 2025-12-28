@@ -96,3 +96,26 @@ class BlockUpdateAccessResponse(BaseModel):
     start_block_ids: list[dict[str, Any]]
     block_uuids: list[str]
     permission: str
+
+
+# =============================================================================
+# Notification Event Models (Reminders & Subscriptions)
+# =============================================================================
+
+class NotificationEventMessage(BaseModel):
+    """Base message for notification events from RabbitMQ."""
+    type: str
+    user_id: str | int
+    data: dict[str, Any]
+
+
+class ReminderEventResponse(BaseModel):
+    """Response for reminder events sent to client."""
+    type: str  # reminder_created, reminder_updated, reminder_deleted, reminder_triggered, reminder_snoozed
+    data: dict[str, Any]
+
+
+class SubscriptionEventResponse(BaseModel):
+    """Response for subscription events sent to client."""
+    type: str  # subscription_created, subscription_updated, subscription_deleted
+    data: dict[str, Any]

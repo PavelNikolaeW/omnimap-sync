@@ -21,6 +21,9 @@ from app.models import (
     BlockUpdateResponse,
     BlockUpdatesBatchResponse,
     BlockUpdateAccessResponse,
+    NotificationEventMessage,
+    ReminderEventResponse,
+    SubscriptionEventResponse,
 )
 from app.redis_client import get_redis_pool
 from app.websockets import connection_manager
@@ -304,6 +307,63 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
         logger.exception("Failed to process unsubscribe action")
 
 
+# =============================================================================
+# Notification Event Types (Reminders & Subscriptions)
+# =============================================================================
+
+REMINDER_EVENT_TYPES = {
+    'reminder_created',
+    'reminder_updated',
+    'reminder_deleted',
+    'reminder_triggered',
+    'reminder_snoozed',
+}
+
+SUBSCRIPTION_EVENT_TYPES = {
+    'subscription_created',
+    'subscription_updated',
+    'subscription_deleted',
+}
+
+NOTIFICATION_EVENT_TYPES = REMINDER_EVENT_TYPES | SUBSCRIPTION_EVENT_TYPES
+
+
+async def action_notification_event(message_data: dict[str, Any]) -> None:
+    """
+    Process notification events (reminders and subscriptions).
+
+    Routes events to the specific user based on user_id.
+    Events are forwarded directly to the user's WebSocket connections.
+    """
+    try:
+        msg = NotificationEventMessage(**message_data)
+    except ValidationError as e:
+        logger.error(f"Invalid notification event message: {e}")
+        return
+
+    user_id = str(msg.user_id)
+    event_type = msg.type
+
+    # Create response based on event type
+    if event_type in REMINDER_EVENT_TYPES:
+        response = ReminderEventResponse(
+            type=event_type,
+            data=msg.data
+        )
+    elif event_type in SUBSCRIPTION_EVENT_TYPES:
+        response = SubscriptionEventResponse(
+            type=event_type,
+            data=msg.data
+        )
+    else:
+        logger.warning(f"Unknown notification event type: {event_type}")
+        return
+
+    # Send to user's WebSocket connections
+    await connection_manager.send_personal_message(response.model_dump(), user_id)
+    logger.info(f"Sent {event_type} event to user {user_id}")
+
+
 async def handle_message(message: IncomingMessage) -> None:
     """
     Process incoming RabbitMQ messages.
@@ -319,7 +379,10 @@ async def handle_message(message: IncomingMessage) -> None:
         return
 
     action = message_data.get('action')
+    event_type = message_data.get('type')
+
     try:
+        # Handle action-based messages (legacy format)
         if action == 'update_block':
             await action_update_block(message_data)
         elif action == 'update_blocks':
@@ -330,8 +393,11 @@ async def handle_message(message: IncomingMessage) -> None:
             await action_subscribe(message_data)
         elif action == 'unsubscribe':
             await action_unsubscribe(message_data)
+        # Handle type-based messages (notification events)
+        elif event_type in NOTIFICATION_EVENT_TYPES:
+            await action_notification_event(message_data)
         else:
-            logger.warning(f"Unknown action received: {action}")
+            logger.warning(f"Unknown message received: action={action}, type={event_type}")
 
         await message.ack()
     except Exception:
