@@ -12,8 +12,12 @@ from app.rabbitmq_consumer import (
     action_update_access,
     action_subscribe,
     action_unsubscribe,
+    action_notification_event,
     handle_message,
     send_message_update_access,
+    REMINDER_EVENT_TYPES,
+    SUBSCRIPTION_EVENT_TYPES,
+    NOTIFICATION_EVENT_TYPES,
 )
 from app.config import settings
 
@@ -574,3 +578,366 @@ class TestMessageHandlingFixed:
         # Fixed: Message is rejected, not acknowledged
         mock_message.reject.assert_called_once_with(requeue=False)
         mock_message.ack.assert_not_called()
+
+
+class TestNotificationEventTypes:
+    """Tests for notification event type constants."""
+
+    def test_reminder_event_types_defined(self):
+        """Test that all reminder event types are defined."""
+        expected = {
+            'reminder_created',
+            'reminder_updated',
+            'reminder_deleted',
+            'reminder_triggered',
+            'reminder_snoozed',
+        }
+        assert REMINDER_EVENT_TYPES == expected
+
+    def test_subscription_event_types_defined(self):
+        """Test that all subscription event types are defined."""
+        expected = {
+            'subscription_created',
+            'subscription_updated',
+            'subscription_deleted',
+        }
+        assert SUBSCRIPTION_EVENT_TYPES == expected
+
+    def test_notification_event_types_is_union(self):
+        """Test that NOTIFICATION_EVENT_TYPES is union of reminder and subscription types."""
+        assert NOTIFICATION_EVENT_TYPES == REMINDER_EVENT_TYPES | SUBSCRIPTION_EVENT_TYPES
+
+
+class TestActionNotificationEvent:
+    """Tests for action_notification_event function."""
+
+    @pytest.mark.asyncio
+    async def test_reminder_created_event(self):
+        """Test handling reminder_created event."""
+        message = {
+            "type": "reminder_created",
+            "user_id": "user_123",
+            "data": {
+                "id": "reminder-uuid",
+                "block_id": "block-uuid",
+                "remind_at": "2025-01-15T10:00:00Z",
+                "timezone": "Europe/Moscow",
+                "message": "Test reminder",
+                "repeat": "none"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        sent_message = call_args[0][0]
+        user_id = call_args[0][1]
+
+        assert sent_message["type"] == "reminder_created"
+        assert sent_message["data"]["id"] == "reminder-uuid"
+        assert user_id == "user_123"
+
+    @pytest.mark.asyncio
+    async def test_reminder_updated_event(self):
+        """Test handling reminder_updated event."""
+        message = {
+            "type": "reminder_updated",
+            "user_id": "user_456",
+            "data": {
+                "id": "reminder-uuid",
+                "block_id": "block-uuid",
+                "remind_at": "2025-01-16T10:00:00Z",
+                "timezone": "Europe/Moscow",
+                "message": "Updated reminder",
+                "repeat": "daily"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "reminder_updated"
+
+    @pytest.mark.asyncio
+    async def test_reminder_deleted_event(self):
+        """Test handling reminder_deleted event."""
+        message = {
+            "type": "reminder_deleted",
+            "user_id": "user_789",
+            "data": {
+                "id": "reminder-uuid",
+                "block_id": "block-uuid"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "reminder_deleted"
+
+    @pytest.mark.asyncio
+    async def test_reminder_triggered_event(self):
+        """Test handling reminder_triggered event."""
+        message = {
+            "type": "reminder_triggered",
+            "user_id": "user_123",
+            "data": {
+                "id": "reminder-uuid",
+                "block_id": "block-uuid",
+                "message": "Reminder triggered"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "reminder_triggered"
+
+    @pytest.mark.asyncio
+    async def test_reminder_snoozed_event(self):
+        """Test handling reminder_snoozed event."""
+        message = {
+            "type": "reminder_snoozed",
+            "user_id": "user_123",
+            "data": {
+                "id": "reminder-uuid",
+                "block_id": "block-uuid",
+                "snoozed_until": "2025-01-15T10:30:00Z"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "reminder_snoozed"
+
+    @pytest.mark.asyncio
+    async def test_subscription_created_event(self):
+        """Test handling subscription_created event."""
+        message = {
+            "type": "subscription_created",
+            "user_id": "user_123",
+            "data": {
+                "id": "sub-uuid",
+                "block_id": "block-uuid",
+                "depth": 1,
+                "on_text_change": True,
+                "on_data_change": True,
+                "on_move": True,
+                "on_child_add": True,
+                "on_child_delete": True
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "subscription_created"
+        assert call_args[0][0]["data"]["depth"] == 1
+
+    @pytest.mark.asyncio
+    async def test_subscription_updated_event(self):
+        """Test handling subscription_updated event."""
+        message = {
+            "type": "subscription_updated",
+            "user_id": "user_456",
+            "data": {
+                "id": "sub-uuid",
+                "block_id": "block-uuid",
+                "depth": 2,
+                "on_text_change": False,
+                "on_data_change": True,
+                "on_move": False,
+                "on_child_add": True,
+                "on_child_delete": True
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "subscription_updated"
+
+    @pytest.mark.asyncio
+    async def test_subscription_deleted_event(self):
+        """Test handling subscription_deleted event."""
+        message = {
+            "type": "subscription_deleted",
+            "user_id": "user_789",
+            "data": {
+                "id": "sub-uuid",
+                "block_id": "block-uuid"
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        assert call_args[0][0]["type"] == "subscription_deleted"
+
+    @pytest.mark.asyncio
+    async def test_notification_event_missing_user_id(self):
+        """Test handling of missing user_id in notification event."""
+        message = {
+            "type": "reminder_created",
+            "data": {"id": "test"}
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        # Should not call send_personal_message due to validation error
+        mock_cm.send_personal_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_notification_event_missing_data(self):
+        """Test handling of missing data in notification event."""
+        message = {
+            "type": "reminder_created",
+            "user_id": "user_123"
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        # Should not call send_personal_message due to validation error
+        mock_cm.send_personal_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_notification_event_user_id_as_int(self):
+        """Test that user_id as int is converted to string."""
+        message = {
+            "type": "reminder_created",
+            "user_id": 12345,  # int instead of string
+            "data": {"id": "test"}
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+            await action_notification_event(message)
+
+        mock_cm.send_personal_message.assert_called_once()
+        call_args = mock_cm.send_personal_message.call_args
+        user_id = call_args[0][1]
+        assert user_id == "12345"  # Should be converted to string
+
+
+class TestHandleMessageNotificationEvents:
+    """Tests for handle_message with notification events."""
+
+    @pytest.fixture
+    def mock_message(self):
+        """Create a mock RabbitMQ message."""
+        message = AsyncMock()
+        message.ack = AsyncMock()
+        message.reject = AsyncMock()
+        message.nack = AsyncMock()
+        return message
+
+    @pytest.mark.asyncio
+    async def test_handle_message_reminder_created(self, mock_message):
+        """Test handling reminder_created event via handle_message."""
+        mock_message.body = json.dumps({
+            "type": "reminder_created",
+            "user_id": "user_123",
+            "data": {"id": "reminder-1", "block_id": "block-1"}
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_notification_event", new_callable=AsyncMock) as mock_action:
+            await handle_message(mock_message)
+
+        mock_action.assert_called_once()
+        mock_message.ack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_subscription_created(self, mock_message):
+        """Test handling subscription_created event via handle_message."""
+        mock_message.body = json.dumps({
+            "type": "subscription_created",
+            "user_id": "user_456",
+            "data": {"id": "sub-1", "block_id": "block-1", "depth": 1}
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_notification_event", new_callable=AsyncMock) as mock_action:
+            await handle_message(mock_message)
+
+        mock_action.assert_called_once()
+        mock_message.ack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_all_reminder_types(self, mock_message):
+        """Test that all reminder event types are handled."""
+        for event_type in REMINDER_EVENT_TYPES:
+            mock_message.body = json.dumps({
+                "type": event_type,
+                "user_id": "user_123",
+                "data": {"id": "test"}
+            }).encode()
+            mock_message.ack.reset_mock()
+
+            with patch("app.rabbitmq_consumer.action_notification_event", new_callable=AsyncMock) as mock_action:
+                await handle_message(mock_message)
+
+            mock_action.assert_called_once()
+            mock_message.ack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_all_subscription_types(self, mock_message):
+        """Test that all subscription event types are handled."""
+        for event_type in SUBSCRIPTION_EVENT_TYPES:
+            mock_message.body = json.dumps({
+                "type": event_type,
+                "user_id": "user_123",
+                "data": {"id": "test"}
+            }).encode()
+            mock_message.ack.reset_mock()
+
+            with patch("app.rabbitmq_consumer.action_notification_event", new_callable=AsyncMock) as mock_action:
+                await handle_message(mock_message)
+
+            mock_action.assert_called_once()
+            mock_message.ack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_action_takes_precedence(self, mock_message):
+        """Test that action field takes precedence over type field."""
+        mock_message.body = json.dumps({
+            "action": "update_block",
+            "type": "reminder_created",  # Should be ignored
+            "block_uuid": "block-1",
+            "block_data": {"title": "Test"}
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_update_block", new_callable=AsyncMock) as mock_block:
+            with patch("app.rabbitmq_consumer.action_notification_event", new_callable=AsyncMock) as mock_notif:
+                await handle_message(mock_message)
+
+        mock_block.assert_called_once()
+        mock_notif.assert_not_called()
+        mock_message.ack.assert_called_once()
