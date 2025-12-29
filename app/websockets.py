@@ -103,7 +103,10 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             action = data.get("action")
             blocks = data.get("blocks", [])
 
-            if action == "get_updates":
+            if action == "ping":
+                await websocket.send_json({"type": "pong"})
+                logger.debug(f"Pong sent to {connection_id}")
+            elif action == "get_updates":
                 await handle_get_updates(websocket, connection_id, blocks)
             else:
                 logger.warning(f"Connection {connection_id} sent unknown action: {action}")
