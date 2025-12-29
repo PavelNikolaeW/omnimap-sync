@@ -21,20 +21,23 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: |
-            --model claude-3-5-haiku-20241022
-            --allowedTools "Read" "Glob" "Grep" "Bash(gh pr:*)" "Bash(gh api:*)" "Bash(git:*)"
-          prompt: |
+          model: claude-sonnet-4-20250514
+          allowed_tools: "Read,Glob,Grep,Bash(gh pr:*),Bash(gh api:*),Bash(git:*)"
+          direct_prompt: |
             Review PR #${{ github.event.pull_request.number }} for code quality, potential bugs, and best practices.
 
-            First, use 'gh pr diff ${{ github.event.pull_request.number }}' to see the changes.
-            Then read the modified files to understand the context.
+            Steps:
+            1. Run 'gh pr diff ${{ github.event.pull_request.number }}' to see all changes
+            2. Read the modified files to understand context
+            3. Analyze the changes for:
+               - Code correctness and logic errors
+               - Potential bugs or edge cases
+               - Performance considerations
+               - Security issues
+               - Code style and maintainability
 
-            Provide constructive feedback on:
-            - Code correctness and logic errors
-            - Potential bugs or edge cases
-            - Performance considerations
-            - Security issues
-            - Code style and maintainability
+            4. IMPORTANT: You MUST submit a PR review comment using:
+               gh pr review ${{ github.event.pull_request.number }} --comment --body "YOUR_REVIEW_HERE"
 
-            After reviewing, submit a PR review with your findings using 'gh pr review ${{ github.event.pull_request.number }}'.
+               If the code looks good, still leave a brief approval comment.
+               If there are issues, describe them clearly.
