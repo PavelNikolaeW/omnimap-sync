@@ -7,6 +7,7 @@ from typing import Optional
 
 from aio_pika import connect_robust
 from fastapi import FastAPI, WebSocket
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.rabbitmq_consumer import start_consumer
@@ -83,6 +84,15 @@ async def check_services() -> None:
     except Exception as e:
         logger.error(f"Failed to connect to RabbitMQ: {e}")
         raise
+
+
+@app.get("/health")
+async def health_check() -> JSONResponse:
+    """Health check endpoint with CORS headers for frontend monitoring."""
+    return JSONResponse(
+        content={"status": "healthy"},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
 
 
 @app.websocket("/ws")
