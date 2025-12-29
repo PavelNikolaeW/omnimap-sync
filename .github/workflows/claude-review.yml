@@ -2,7 +2,9 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
+  issue_comment:
+    types: [created]
 
 jobs:
   review:
@@ -17,13 +19,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: PR Review with Progress Tracking
+      - name: PR Review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          model: claude-sonnet-4-20250514
-          allowed_tools: "Read,Glob,Grep,Bash(gh pr:*),Bash(gh api:*),Bash(git:*)"
-          direct_prompt: |
+          prompt: |
             Review PR #${{ github.event.pull_request.number }} for code quality, potential bugs, and best practices.
 
             Steps:

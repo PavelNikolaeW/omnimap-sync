@@ -12,6 +12,7 @@ from app.connection_manager import ConnectionManager
 from app.config import settings
 from app.models import ErrorResponse, BlockUpdatesResponse
 from app.redis_client import get_redis_pool
+from app.utils import parse_redis_block_data
 from app.auth import verify_jwt
 
 logger = logging.getLogger("realtime_service")
@@ -194,8 +195,8 @@ async def handle_get_updates(
                 redis_time = int(redis_data.get("updated_at", 0))
                 client_time = valid_blocks_dict[block_id]
                 if redis_time > client_time:
-                    decoded_data = {k: v for k, v in redis_data.items()}
-                    updated_blocks_data.append(decoded_data)
+                    parsed_data = parse_redis_block_data(redis_data)
+                    updated_blocks_data.append(parsed_data)
             except ValueError as e:
                 logger.exception(f"Error parsing updated_at for block {block_id}: {e}")
 

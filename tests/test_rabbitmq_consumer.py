@@ -46,9 +46,10 @@ class TestActionUpdateBlock:
                 mock_cm.send_message_to_subscribers = AsyncMock()
                 await action_update_block(message)
 
+        # Values are serialized for Redis (numbers become strings)
         mock_redis.hset.assert_called_once_with(
             "blockdata:block-123",
-            mapping={"title": "Test", "updated_at": 1000}
+            mapping={"title": "Test", "updated_at": "1000"}
         )
 
     @pytest.mark.asyncio

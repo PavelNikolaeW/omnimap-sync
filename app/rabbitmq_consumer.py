@@ -26,6 +26,7 @@ from app.models import (
     SubscriptionEventResponse,
 )
 from app.redis_client import get_redis_pool
+from app.utils import prepare_block_data_for_redis, parse_redis_block_data
 from app.websockets import connection_manager
 
 logger = logging.getLogger("realtime_service")
@@ -47,7 +48,8 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
     key_data = f'blockdata:{msg.block_uuid}'
 
     try:
-        await redis.hset(key_data, mapping=msg.block_data)
+        prepared_data = prepare_block_data_for_redis(msg.block_data)
+        await redis.hset(key_data, mapping=prepared_data)
     except Exception:
         logger.exception(f"Failed to save block data for block_uuid={msg.block_uuid}")
         return
@@ -94,7 +96,8 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
             if not isinstance(block_data, dict):
                 logger.error(f"block_data for {block_uuid} is not a dict")
                 continue
-            pipe.hset(f"blockdata:{block_uuid}", mapping=block_data)
+            prepared_data = prepare_block_data_for_redis(block_data)
+            pipe.hset(f"blockdata:{block_uuid}", mapping=prepared_data)
         await pipe.execute()
     except Exception:
         logger.exception("Failed to save block data for batch update")
@@ -169,7 +172,7 @@ async def send_message_update_access(
         for key in keys:
             pipe.hgetall(key)
         results = await pipe.execute()
-        data_list = [data for data in results if data]
+        data_list = [parse_redis_block_data(data) for data in results if data]
 
     if data_list:
         response = BlockUpdateAccessResponse(
