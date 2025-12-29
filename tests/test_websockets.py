@@ -126,6 +126,28 @@ class TestWebsocketEndpoint:
         mock_handler.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_websocket_endpoint_ping_returns_pong(self, mock_ws, valid_token):
+        """Test that ping action returns pong response."""
+        mock_ws.query_params = {"token": valid_token}
+
+        mock_ws.receive_text = AsyncMock(side_effect=[
+            json.dumps({"action": "ping"}),
+            WebSocketDisconnect()
+        ])
+
+        with patch("app.websockets.verify_jwt", return_value=True):
+            with patch.object(connection_manager, "connect", new_callable=AsyncMock):
+                with patch.object(connection_manager, "disconnect", new_callable=AsyncMock):
+                    await websocket_endpoint(mock_ws)
+
+        # Check that pong was sent
+        send_calls = mock_ws.send_json.call_args_list
+        assert any(
+            call[0][0].get("type") == "pong"
+            for call in send_calls
+        )
+
+    @pytest.mark.asyncio
     async def test_websocket_endpoint_unknown_action_returns_error(self, mock_ws, valid_token):
         """Test that unknown action returns error message."""
         mock_ws.query_params = {"token": valid_token}
