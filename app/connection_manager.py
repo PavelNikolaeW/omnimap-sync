@@ -169,3 +169,62 @@ class ConnectionManager:
             for user_id in subscribers
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def send_to_user(self, user_id: str, message: dict[str, Any]) -> bool:
+        """
+        Send a message to a specific user.
+
+        Returns True if user has active connections and message was sent,
+        False if user is offline (no active connections).
+        """
+        user_lock = await self._get_user_lock(user_id)
+        async with user_lock:
+            connections = list(self.active_connections.get(user_id, []))
+
+        if not connections:
+            return False
+
+        await asyncio.gather(
+            *(self.send_message_to_socket(message, user_id, ws) for ws in connections),
+            return_exceptions=True
+        )
+        return True
+
+    async def send_to_users(
+        self,
+        user_ids: list[str],
+        message: dict[str, Any],
+        exclude_user: str | None = None
+    ) -> dict[str, bool]:
+        """
+        Send a message to multiple users.
+
+        Args:
+            user_ids: List of user IDs to send to
+            message: Message to send
+            exclude_user: Optional user ID to exclude from sending
+
+        Returns:
+            Dict mapping user_id to delivery status (True if delivered, False if offline)
+        """
+        results: dict[str, bool] = {}
+
+        async def send_and_track(uid: str) -> tuple[str, bool]:
+            delivered = await self.send_to_user(uid, message)
+            return uid, delivered
+
+        tasks = [
+            send_and_track(uid)
+            for uid in user_ids
+            if uid != exclude_user
+        ]
+
+        if tasks:
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in task_results:
+                if isinstance(result, tuple):
+                    uid, delivered = result
+                    results[uid] = delivered
+                # Exceptions are silently ignored (user treated as offline)
+
+        return results
