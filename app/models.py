@@ -122,55 +122,34 @@ class SubscriptionEventResponse(BaseModel):
 
 
 # =============================================================================
-# Chat Models (P2P and Group messaging)
+# Chat Event Models (P2P and Group messaging)
 # =============================================================================
 
-# --- RabbitMQ incoming messages ---
+class ChatEventMessage(BaseModel):
+    """
+    Chat event from RabbitMQ (action: 'chat_event').
 
-class ChatDMMessage(BaseModel):
-    """Direct message from RabbitMQ queue chat_dm."""
-    recipient_id: str | int
-    message: dict[str, Any]  # Contains id, sender_id, sender_username, content, created_at
-
-
-class ChatGroupMessage(BaseModel):
-    """Group message from RabbitMQ queue chat_group."""
-    group_id: str
-    group_name: str | None = None
-    sender_id: str | int
-    member_ids: list[str]
-    message: dict[str, Any]  # Contains id, sender_id, sender_username, content, created_at
-
-
-class ChatGroupUpdateMessage(BaseModel):
-    """Group update notification from RabbitMQ queue chat_group_update."""
-    group_id: str
-    action: Literal["member_added", "member_removed", "renamed", "deleted"]
-    member_ids: list[str]  # Current group members to notify
-    data: dict[str, Any]  # Action-specific data
+    Used by backend to send DM, group messages, and group updates.
+    """
+    type: Literal["dm", "group_message", "group_update"]
+    sender_id: int | str | None = None
+    recipient_id: int | str | None = None  # For DM
+    group_id: str | None = None  # For group messages
+    group_action: str | None = None  # For group_update: member_added, member_removed, etc.
+    message: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None  # For group_update
+    member_ids: list[int | str] = Field(default_factory=list)  # For group messages
 
 
-class ChatDMReadMessage(BaseModel):
-    """DM read receipt from RabbitMQ."""
-    user_id: str | int  # User who read messages
-    recipient_id: str | int  # User to notify
-    last_read_at: str  # ISO8601 timestamp
+class ChatEventResponse(BaseModel):
+    """
+    Chat event response sent to client via WebSocket.
 
-
-# --- WebSocket outgoing responses ---
-
-class DMResponse(BaseModel):
-    """Direct message notification sent to client."""
-    type: Literal["dm"] = "dm"
-    message: dict[str, Any]
-
-
-class GroupMessageResponse(BaseModel):
-    """Group message notification sent to client."""
-    type: Literal["group_message"] = "group_message"
-    group_id: str
-    group_name: str | None = None
-    message: dict[str, Any]
+    Format: { type: 'chat_event', event_type: '...', data: {...} }
+    """
+    type: Literal["chat_event"] = "chat_event"
+    event_type: str  # dm, group_message, group_update
+    data: dict[str, Any]
 
 
 class DMTypingResponse(BaseModel):
@@ -190,30 +169,7 @@ class GroupTypingResponse(BaseModel):
     is_typing: bool
 
 
-class DMReadResponse(BaseModel):
-    """DM read receipt sent to client."""
-    type: Literal["dm_read"] = "dm_read"
-    user_id: str
-    last_read_at: str
-
-
-class PresenceResponse(BaseModel):
-    """User presence status sent to client."""
-    type: Literal["presence"] = "presence"
-    user_id: str
-    online: bool
-    last_seen: str | None = None
-
-
 class PresenceBatchResponse(BaseModel):
     """Batch presence response for multiple users."""
     type: Literal["presence_response"] = "presence_response"
     users: list[dict[str, Any]]
-
-
-class GroupUpdateResponse(BaseModel):
-    """Group update notification sent to client."""
-    type: Literal["group_update"] = "group_update"
-    group_id: str
-    action: str
-    data: dict[str, Any]

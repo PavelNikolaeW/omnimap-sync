@@ -24,15 +24,8 @@ from app.models import (
     NotificationEventMessage,
     ReminderEventResponse,
     SubscriptionEventResponse,
-    # Chat models
-    ChatDMMessage,
-    ChatGroupMessage,
-    ChatGroupUpdateMessage,
-    ChatDMReadMessage,
-    DMResponse,
-    GroupMessageResponse,
-    GroupUpdateResponse,
-    DMReadResponse,
+    ChatEventMessage,
+    ChatEventResponse,
 )
 from app.redis_client import get_redis_pool
 from app.utils import prepare_block_data_for_redis, parse_redis_block_data
@@ -339,134 +332,107 @@ SUBSCRIPTION_EVENT_TYPES = {
 
 NOTIFICATION_EVENT_TYPES = REMINDER_EVENT_TYPES | SUBSCRIPTION_EVENT_TYPES
 
-# Chat action types
-CHAT_ACTION_TYPES = {
-    'chat_dm',
-    'chat_group',
-    'chat_group_update',
-    'chat_dm_read',
-}
-
 
 # =============================================================================
-# Chat Message Handlers
+# Chat Event Handler (from backend with action: 'chat_event')
 # =============================================================================
 
-async def action_chat_dm(message_data: dict[str, Any]) -> None:
+async def action_chat_event(message_data: dict[str, Any]) -> None:
     """
-    Process a direct message from RabbitMQ.
+    Process chat events from backend (action: 'chat_event').
 
-    Routes the message to the recipient's WebSocket connections.
+    Handles three event types:
+    - dm: Direct message to a single recipient
+    - group_message: Message to all group members
+    - group_update: Group membership/settings change notification
     """
     try:
-        msg = ChatDMMessage(**message_data)
+        msg = ChatEventMessage(**message_data)
     except ValidationError as e:
-        logger.error(f"Invalid chat_dm message: {e}")
+        logger.error(f"Invalid chat_event message: {e}")
         return
 
-    recipient_id = str(msg.recipient_id)
+    event_type = msg.type
 
-    response = DMResponse(message=msg.message)
-    delivered = await connection_manager.send_to_user(recipient_id, response.model_dump())
+    if event_type == "dm":
+        # Direct message: send to recipient only
+        if not msg.recipient_id:
+            logger.error("DM chat_event missing recipient_id")
+            return
 
-    if delivered:
-        logger.info(f"DM delivered to user {recipient_id}")
+        recipient_id = str(msg.recipient_id)
+        response = ChatEventResponse(
+            event_type="dm",
+            data={
+                "sender_id": msg.sender_id,
+                "message": msg.message
+            }
+        )
+
+        delivered = await connection_manager.send_to_user(recipient_id, response.model_dump())
+        if delivered:
+            logger.info(f"Chat DM delivered to user {recipient_id}")
+        else:
+            logger.debug(f"Chat DM not delivered, user {recipient_id} is offline")
+
+    elif event_type == "group_message":
+        # Group message: send to all members except sender
+        if not msg.member_ids:
+            logger.warning("group_message chat_event has no member_ids")
+            return
+
+        sender_id = str(msg.sender_id) if msg.sender_id else None
+        member_ids = [str(uid) for uid in msg.member_ids]
+
+        response = ChatEventResponse(
+            event_type="group_message",
+            data={
+                "group_id": msg.group_id,
+                "sender_id": msg.sender_id,
+                "message": msg.message
+            }
+        )
+
+        results = await connection_manager.send_to_users(
+            member_ids,
+            response.model_dump(),
+            exclude_user=sender_id
+        )
+
+        delivered_count = sum(1 for delivered in results.values() if delivered)
+        total_recipients = len(member_ids) - (1 if sender_id else 0)
+        logger.info(
+            f"Chat group_message for group {msg.group_id} delivered to "
+            f"{delivered_count}/{total_recipients} members"
+        )
+
+    elif event_type == "group_update":
+        # Group update: send to all members
+        if not msg.member_ids:
+            logger.warning("group_update chat_event has no member_ids")
+            return
+
+        member_ids = [str(uid) for uid in msg.member_ids]
+
+        response = ChatEventResponse(
+            event_type="group_update",
+            data={
+                "group_id": msg.group_id,
+                "group_action": msg.group_action,
+                "data": msg.data
+            }
+        )
+
+        results = await connection_manager.send_to_users(member_ids, response.model_dump())
+
+        delivered_count = sum(1 for delivered in results.values() if delivered)
+        logger.info(
+            f"Chat group_update '{msg.group_action}' for group {msg.group_id} "
+            f"delivered to {delivered_count}/{len(member_ids)} members"
+        )
+
     else:
-        logger.debug(f"DM not delivered, user {recipient_id} is offline")
-
-
-async def action_chat_group(message_data: dict[str, Any]) -> None:
-    """
-    Process a group message from RabbitMQ.
-
-    Routes the message to all group members except the sender.
-    """
-    try:
-        msg = ChatGroupMessage(**message_data)
-    except ValidationError as e:
-        logger.error(f"Invalid chat_group message: {e}")
-        return
-
-    sender_id = str(msg.sender_id)
-    member_ids = [str(uid) for uid in msg.member_ids]
-
-    response = GroupMessageResponse(
-        group_id=msg.group_id,
-        group_name=msg.group_name,
-        message=msg.message
-    )
-
-    results = await connection_manager.broadcast_to_group(
-        member_ids,
-        response.model_dump(),
-        exclude_user=sender_id
-    )
-
-    delivered_count = sum(1 for delivered in results.values() if delivered)
-    logger.info(
-        f"Group message for group {msg.group_id} delivered to "
-        f"{delivered_count}/{len(member_ids) - 1} members"
-    )
-
-
-async def action_chat_group_update(message_data: dict[str, Any]) -> None:
-    """
-    Process a group update notification from RabbitMQ.
-
-    Routes the update to all current group members.
-    """
-    try:
-        msg = ChatGroupUpdateMessage(**message_data)
-    except ValidationError as e:
-        logger.error(f"Invalid chat_group_update message: {e}")
-        return
-
-    member_ids = [str(uid) for uid in msg.member_ids]
-
-    response = GroupUpdateResponse(
-        group_id=msg.group_id,
-        action=msg.action,
-        data=msg.data
-    )
-
-    results = await connection_manager.broadcast_to_group(
-        member_ids,
-        response.model_dump()
-    )
-
-    delivered_count = sum(1 for delivered in results.values() if delivered)
-    logger.info(
-        f"Group update '{msg.action}' for group {msg.group_id} delivered to "
-        f"{delivered_count}/{len(member_ids)} members"
-    )
-
-
-async def action_chat_dm_read(message_data: dict[str, Any]) -> None:
-    """
-    Process a DM read receipt from RabbitMQ.
-
-    Notifies the original sender that their messages were read.
-    """
-    try:
-        msg = ChatDMReadMessage(**message_data)
-    except ValidationError as e:
-        logger.error(f"Invalid chat_dm_read message: {e}")
-        return
-
-    recipient_id = str(msg.recipient_id)
-    reader_user_id = str(msg.user_id)
-
-    response = DMReadResponse(
-        user_id=reader_user_id,
-        last_read_at=msg.last_read_at
-    )
-
-    delivered = await connection_manager.send_to_user(recipient_id, response.model_dump())
-
-    if delivered:
-        logger.info(f"DM read receipt sent to user {recipient_id}")
-    else:
-        logger.debug(f"DM read receipt not delivered, user {recipient_id} is offline")
+        logger.warning(f"Unknown chat_event type: {event_type}")
 
 
 async def action_notification_event(message_data: dict[str, Any]) -> None:
@@ -523,7 +489,7 @@ async def handle_message(message: IncomingMessage) -> None:
     event_type = message_data.get('type')
 
     try:
-        # Handle action-based messages (legacy format)
+        # Handle action-based messages
         if action == 'update_block':
             await action_update_block(message_data)
         elif action == 'update_blocks':
@@ -534,15 +500,9 @@ async def handle_message(message: IncomingMessage) -> None:
             await action_subscribe(message_data)
         elif action == 'unsubscribe':
             await action_unsubscribe(message_data)
-        # Handle chat actions
-        elif action == 'chat_dm':
-            await action_chat_dm(message_data)
-        elif action == 'chat_group':
-            await action_chat_group(message_data)
-        elif action == 'chat_group_update':
-            await action_chat_group_update(message_data)
-        elif action == 'chat_dm_read':
-            await action_chat_dm_read(message_data)
+        # Handle chat events from backend
+        elif action == 'chat_event':
+            await action_chat_event(message_data)
         # Handle type-based messages (notification events)
         elif event_type in NOTIFICATION_EVENT_TYPES:
             await action_notification_event(message_data)
