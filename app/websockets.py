@@ -10,7 +10,13 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.connection_manager import ConnectionManager
 from app.config import settings
-from app.models import ErrorResponse, BlockUpdatesResponse
+from app.models import (
+    ErrorResponse,
+    BlockUpdatesResponse,
+    DMTypingResponse,
+    GroupTypingResponse,
+    PresenceBatchResponse,
+)
 from app.redis_client import get_redis_pool
 from app.utils import parse_redis_block_data
 from app.auth import verify_jwt
@@ -102,16 +108,29 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 continue
 
             action = data.get("action")
+            msg_type = data.get("type")
             blocks = data.get("blocks", [])
 
+            # Handle action-based messages
             if action == "ping":
                 await websocket.send_json({"type": "pong"})
                 logger.debug(f"Pong sent to {connection_id}")
             elif action == "get_updates":
                 await handle_get_updates(websocket, connection_id, blocks)
+            # Handle type-based messages (chat)
+            elif msg_type == "chat_subscribe":
+                await handle_chat_subscribe(websocket, connection_id)
+            elif msg_type == "dm_typing":
+                await handle_dm_typing(connection_id, data)
+            elif msg_type == "group_typing":
+                await handle_group_typing(connection_id, data)
+            elif msg_type == "presence_request":
+                await handle_presence_request(websocket, data)
+            elif action or msg_type:
+                logger.warning(f"Connection {connection_id} sent unknown action/type: action={action}, type={msg_type}")
+                await websocket.send_json(ErrorResponse(message="Unknown action or type.").model_dump())
             else:
-                logger.warning(f"Connection {connection_id} sent unknown action: {action}")
-                await websocket.send_json(ErrorResponse(message="Unknown action.").model_dump())
+                await websocket.send_json(ErrorResponse(message="Missing action or type field.").model_dump())
 
     finally:
         await connection_manager.disconnect(connection_id, websocket)
@@ -212,3 +231,121 @@ async def handle_get_updates(
         f"Sent block updates to {connection_id}: {len(updated_blocks_data)} total blocks "
         f"({len(valid_blocks_dict)} subscribed, {len(unsubscribed_blocks)} deleted)"
     )
+
+
+# =============================================================================
+# Chat Message Handlers
+# =============================================================================
+
+async def handle_chat_subscribe(websocket: WebSocket, connection_id: str) -> None:
+    """
+    Handle chat subscription request.
+
+    Acknowledges the subscription and updates presence.
+    """
+    connection_manager.update_presence(connection_id)
+    await websocket.send_json({"type": "chat_subscribed", "status": "ok"})
+    logger.info(f"User {connection_id} subscribed to chat")
+
+
+async def handle_dm_typing(sender_id: str, data: dict[str, Any]) -> None:
+    """
+    Handle DM typing indicator.
+
+    Forwards the typing status to the recipient.
+    """
+    recipient_id = data.get("recipient_id")
+    is_typing = data.get("is_typing", False)
+
+    if not recipient_id:
+        logger.warning(f"DM typing from {sender_id} missing recipient_id")
+        return
+
+    recipient_id = str(recipient_id)
+
+    # Get sender username from Redis or use ID
+    redis = await get_redis_pool()
+    username = await redis.get(f"user:{sender_id}:username")
+
+    response = DMTypingResponse(
+        user_id=sender_id,
+        username=username,
+        is_typing=is_typing
+    )
+
+    delivered = await connection_manager.send_to_user(recipient_id, response.model_dump())
+
+    if delivered:
+        logger.debug(f"DM typing indicator from {sender_id} sent to {recipient_id}")
+    else:
+        logger.debug(f"DM typing indicator not delivered, user {recipient_id} is offline")
+
+
+async def handle_group_typing(sender_id: str, data: dict[str, Any]) -> None:
+    """
+    Handle group typing indicator.
+
+    Forwards the typing status to all group members.
+    """
+    group_id = data.get("group_id")
+    is_typing = data.get("is_typing", False)
+
+    if not group_id:
+        logger.warning(f"Group typing from {sender_id} missing group_id")
+        return
+
+    # Get group members from Redis cache
+    redis = await get_redis_pool()
+    member_ids_raw = await redis.smembers(f"group:{group_id}:members")
+
+    if not member_ids_raw:
+        logger.debug(f"No cached members for group {group_id}")
+        return
+
+    member_ids = [str(uid) for uid in member_ids_raw]
+
+    # Get sender username from Redis
+    username = await redis.get(f"user:{sender_id}:username")
+
+    response = GroupTypingResponse(
+        group_id=group_id,
+        user_id=sender_id,
+        username=username,
+        is_typing=is_typing
+    )
+
+    results = await connection_manager.broadcast_to_group(
+        member_ids,
+        response.model_dump(),
+        exclude_user=sender_id
+    )
+
+    delivered_count = sum(1 for delivered in results.values() if delivered)
+    logger.debug(
+        f"Group typing indicator from {sender_id} for group {group_id} "
+        f"sent to {delivered_count} members"
+    )
+
+
+async def handle_presence_request(websocket: WebSocket, data: dict[str, Any]) -> None:
+    """
+    Handle presence status request.
+
+    Returns online status for the requested users.
+    """
+    user_ids = data.get("user_ids", [])
+
+    if not isinstance(user_ids, list):
+        await websocket.send_json(ErrorResponse(message="user_ids must be a list").model_dump())
+        return
+
+    # Convert to strings
+    user_ids = [str(uid) for uid in user_ids]
+
+    # Get presence info
+    presence_data = connection_manager.get_presence_batch(user_ids)
+
+    response = PresenceBatchResponse(users=presence_data)
+    await websocket.send_json(response.model_dump())
+
+    logger.debug(f"Sent presence info for {len(user_ids)} users")

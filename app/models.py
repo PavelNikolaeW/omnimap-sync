@@ -119,3 +119,101 @@ class SubscriptionEventResponse(BaseModel):
     """Response for subscription events sent to client."""
     type: str  # subscription_created, subscription_updated, subscription_deleted
     data: dict[str, Any]
+
+
+# =============================================================================
+# Chat Models (P2P and Group messaging)
+# =============================================================================
+
+# --- RabbitMQ incoming messages ---
+
+class ChatDMMessage(BaseModel):
+    """Direct message from RabbitMQ queue chat_dm."""
+    recipient_id: str | int
+    message: dict[str, Any]  # Contains id, sender_id, sender_username, content, created_at
+
+
+class ChatGroupMessage(BaseModel):
+    """Group message from RabbitMQ queue chat_group."""
+    group_id: str
+    group_name: str | None = None
+    sender_id: str | int
+    member_ids: list[str]
+    message: dict[str, Any]  # Contains id, sender_id, sender_username, content, created_at
+
+
+class ChatGroupUpdateMessage(BaseModel):
+    """Group update notification from RabbitMQ queue chat_group_update."""
+    group_id: str
+    action: Literal["member_added", "member_removed", "renamed", "deleted"]
+    member_ids: list[str]  # Current group members to notify
+    data: dict[str, Any]  # Action-specific data
+
+
+class ChatDMReadMessage(BaseModel):
+    """DM read receipt from RabbitMQ."""
+    user_id: str | int  # User who read messages
+    recipient_id: str | int  # User to notify
+    last_read_at: str  # ISO8601 timestamp
+
+
+# --- WebSocket outgoing responses ---
+
+class DMResponse(BaseModel):
+    """Direct message notification sent to client."""
+    type: Literal["dm"] = "dm"
+    message: dict[str, Any]
+
+
+class GroupMessageResponse(BaseModel):
+    """Group message notification sent to client."""
+    type: Literal["group_message"] = "group_message"
+    group_id: str
+    group_name: str | None = None
+    message: dict[str, Any]
+
+
+class DMTypingResponse(BaseModel):
+    """DM typing indicator sent to client."""
+    type: Literal["dm_typing"] = "dm_typing"
+    user_id: str
+    username: str | None = None
+    is_typing: bool
+
+
+class GroupTypingResponse(BaseModel):
+    """Group typing indicator sent to client."""
+    type: Literal["group_typing"] = "group_typing"
+    group_id: str
+    user_id: str
+    username: str | None = None
+    is_typing: bool
+
+
+class DMReadResponse(BaseModel):
+    """DM read receipt sent to client."""
+    type: Literal["dm_read"] = "dm_read"
+    user_id: str
+    last_read_at: str
+
+
+class PresenceResponse(BaseModel):
+    """User presence status sent to client."""
+    type: Literal["presence"] = "presence"
+    user_id: str
+    online: bool
+    last_seen: str | None = None
+
+
+class PresenceBatchResponse(BaseModel):
+    """Batch presence response for multiple users."""
+    type: Literal["presence_response"] = "presence_response"
+    users: list[dict[str, Any]]
+
+
+class GroupUpdateResponse(BaseModel):
+    """Group update notification sent to client."""
+    type: Literal["group_update"] = "group_update"
+    group_id: str
+    action: str
+    data: dict[str, Any]
