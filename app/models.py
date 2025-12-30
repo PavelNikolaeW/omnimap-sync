@@ -119,3 +119,57 @@ class SubscriptionEventResponse(BaseModel):
     """Response for subscription events sent to client."""
     type: str  # subscription_created, subscription_updated, subscription_deleted
     data: dict[str, Any]
+
+
+# =============================================================================
+# Chat Event Models (P2P and Group messaging)
+# =============================================================================
+
+class ChatEventMessage(BaseModel):
+    """
+    Chat event from RabbitMQ (action: 'chat_event').
+
+    Used by backend to send DM, group messages, and group updates.
+    """
+    type: Literal["dm", "group_message", "group_update"]
+    sender_id: int | str | None = None
+    recipient_id: int | str | None = None  # For DM
+    group_id: str | None = None  # For group messages
+    group_action: str | None = None  # For group_update: member_added, member_removed, etc.
+    message: dict[str, Any] | None = None
+    data: dict[str, Any] | None = None  # For group_update
+    member_ids: list[int | str] = Field(default_factory=list)  # For group messages
+
+
+class ChatEventResponse(BaseModel):
+    """
+    Chat event response sent to client via WebSocket.
+
+    Format: { type: 'chat_event', event_type: '...', data: {...} }
+    """
+    type: Literal["chat_event"] = "chat_event"
+    event_type: str  # dm, group_message, group_update
+    data: dict[str, Any]
+
+
+class DMTypingResponse(BaseModel):
+    """DM typing indicator sent to client."""
+    type: Literal["dm_typing"] = "dm_typing"
+    user_id: str
+    username: str | None = None
+    is_typing: bool
+
+
+class GroupTypingResponse(BaseModel):
+    """Group typing indicator sent to client."""
+    type: Literal["group_typing"] = "group_typing"
+    group_id: str
+    user_id: str
+    username: str | None = None
+    is_typing: bool
+
+
+class PresenceBatchResponse(BaseModel):
+    """Batch presence response for multiple users."""
+    type: Literal["presence_response"] = "presence_response"
+    users: list[dict[str, Any]]
