@@ -23,7 +23,7 @@ jobs:
   # =============================================================================
   lint:
     name: Lint & Test
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
