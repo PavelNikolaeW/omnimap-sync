@@ -1,0 +1,60 @@
+# CI/CD for omnimap-sync service
+# Place this file in: services/omnimap-sync/.gitverse/workflows/ci.yaml
+#
+# Triggers:
+#   - main branch -> deploy to DEV
+#   - release/* branch -> deploy to PROD
+
+name: CI/CD Sync
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  # =============================================================================
+  # Lint and Test
+  # =============================================================================
+  lint:
+    name: Lint & Test
+    runs-on: [self-hosted, linux]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-asyncio
+
+      - name: Lint with ruff
+        run: ruff check .
+
+      - name: Run tests
+        run: pytest -v
+
+  # =============================================================================
+  # Build and Deploy (only on push to main or release/*)
+  # =============================================================================
+  deploy:
+    name: Build & Deploy
+    needs: lint
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    uses: PavelNikolaeW/omnimap-platform/.gitverse/workflows/deploy-service.yaml@main
+    with:
+      service_name: omnimap-sync
+      context_path: .
+      dockerfile_path: Dockerfile
+    secrets: inherit
