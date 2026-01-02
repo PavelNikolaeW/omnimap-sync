@@ -121,8 +121,8 @@ jobs:
             --namespace "${NAMESPACE}" \
             -f "${VALUES_FILE}" \
             --set ${{ env.HELM_VALUE_KEY }}.image.tag=${TAG} \
-            --wait \
-            --timeout 10m
+            --atomic \
+            --timeout 5m
 
       - name: Show status
         if: always()
