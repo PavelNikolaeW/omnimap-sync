@@ -1,5 +1,4 @@
 # CI/CD for omnimap-sync service
-# Place this file in: services/omnimap-sync/.gitverse/workflows/ci.yaml
 #
 # Triggers:
 #   - main branch -> deploy to DEV
@@ -17,44 +16,99 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  REGISTRY: omnimap-registry.cr.cloud.ru/omnimap
+  SERVICE_NAME: omnimap-sync
+  HELM_VALUE_KEY: sync
+
 jobs:
-  # =============================================================================
-  # Lint and Test
-  # =============================================================================
-  lint:
-    name: Lint & Test
-    runs-on: [self-hosted]
+  build:
+    name: Build
+    runs-on: self-hosted
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      environment: ${{ steps.meta.outputs.environment }}
+      namespace: ${{ steps.meta.outputs.namespace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
+      - name: Calculate metadata
+        id: meta
         run: |
-          pip install -r requirements.txt
-          pip install ruff pytest pytest-asyncio
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          COMMIT=$(git rev-parse --short HEAD)
 
-      - name: Lint with ruff
-        run: ruff check .
+          if [[ "$BRANCH" == "main" ]]; then
+            echo "tag=dev-${COMMIT}" >> $GITHUB_OUTPUT
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "namespace=omnimap-dev" >> $GITHUB_OUTPUT
+          elif [[ "$BRANCH" == release/* ]]; then
+            VERSION="${BRANCH#release/}"
+            echo "tag=${VERSION}-${COMMIT}" >> $GITHUB_OUTPUT
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "namespace=omnimap-prod" >> $GITHUB_OUTPUT
+          fi
 
-      - name: Run tests
-        run: pytest -v
+      - name: Login to Registry
+        run: |
+          echo "${{ secrets.CLOUDRU_REGISTRY_SK }}" | docker login omnimap-registry.cr.cloud.ru -u "${{ secrets.CLOUDRU_REGISTRY_AK }}" --password-stdin
 
-  # =============================================================================
-  # Build and Deploy (only on push to main or release/*)
-  # =============================================================================
+      - name: Build and Push
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          docker build -t ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG} .
+          docker push ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG}
+          echo "Pushed ${{ env.SERVICE_NAME }}:${TAG}"
+
   deploy:
-    name: Build & Deploy
-    needs: lint
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
-    uses: PavelNikolaeW/omnimap-platform/.gitverse/workflows/deploy-service.yaml@main
-    with:
-      service_name: omnimap-sync
-      context_path: .
-      dockerfile_path: Dockerfile
-    secrets: inherit
+    name: Deploy to ${{ needs.build.outputs.environment }}
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Helm repo
+        uses: actions/checkout@v4
+        with:
+          repository: PavelNikolaeW/omnimap-helm
+          ref: main
+
+      - name: Setup Helm
+        run: |
+          if ! command -v helm &> /dev/null; then
+            curl -fsSL https://get.helm.sh/helm-v3.14.0-darwin-amd64.tar.gz -o helm.tar.gz
+            tar -zxvf helm.tar.gz
+            mkdir -p $HOME/.local/bin
+            mv darwin-amd64/helm $HOME/.local/bin/
+            rm -rf darwin-amd64 helm.tar.gz
+          fi
+          export PATH="$HOME/.local/bin:$PATH"
+          helm version --short
+
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.CLOUDRU_KUBECONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Deploy with Helm
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          ENV="${{ needs.build.outputs.environment }}"
+          TAG="${{ needs.build.outputs.tag }}"
+          NAMESPACE="${{ needs.build.outputs.namespace }}"
+
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+          helm dependency update charts/omnimap
+
+          helm upgrade --install omnimap-${ENV} charts/omnimap \
+            --namespace "${NAMESPACE}" \
+            -f charts/omnimap/values-${ENV}.yaml \
+            --set ${{ env.HELM_VALUE_KEY }}.image.tag=${TAG} \
+            --wait \
+            --timeout 5m
+
+      - name: Show status
+        if: always()
+        run: |
+          kubectl get pods -n "${{ needs.build.outputs.namespace }}" -l app.kubernetes.io/name=${{ env.SERVICE_NAME }} || true
