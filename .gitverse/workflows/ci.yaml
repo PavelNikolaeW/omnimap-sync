@@ -19,7 +19,7 @@ on:
 env:
   REGISTRY: omnimap-registry.cr.cloud.ru/omnimap
   SERVICE_NAME: omnimap-sync
-  HELM_VALUE_KEY: sync
+  DEPLOYMENT_NAME: omnimap-sync
 
 jobs:
   build:
@@ -29,7 +29,6 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       environment: ${{ steps.meta.outputs.environment }}
       namespace: ${{ steps.meta.outputs.namespace }}
-      release: ${{ steps.meta.outputs.release }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,13 +43,11 @@ jobs:
             echo "tag=dev-${COMMIT}" >> $GITHUB_OUTPUT
             echo "environment=dev" >> $GITHUB_OUTPUT
             echo "namespace=omnimap" >> $GITHUB_OUTPUT
-            echo "release=omnimap" >> $GITHUB_OUTPUT
           elif [[ "$BRANCH" == release/* ]]; then
             VERSION="${BRANCH#release/}"
             echo "tag=${VERSION}-${COMMIT}" >> $GITHUB_OUTPUT
             echo "environment=prod" >> $GITHUB_OUTPUT
             echo "namespace=omnimap-prod" >> $GITHUB_OUTPUT
-            echo "release=omnimap-prod" >> $GITHUB_OUTPUT
           fi
 
       - name: Login to Registry
@@ -70,23 +67,6 @@ jobs:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: self-hosted
     steps:
-      - name: Checkout Helm repo
-        run: |
-          rm -rf omnimap-helm
-          git clone https://oauth2:${{ secrets.TOKEN_RUNNER }}@gitverse.ru/PavelNikolaeW/omnimap-helm.git
-
-      - name: Setup Helm
-        run: |
-          if ! command -v helm &> /dev/null; then
-            curl -fsSL https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz -o helm.tar.gz
-            tar -zxvf helm.tar.gz
-            mkdir -p $HOME/.local/bin
-            mv linux-amd64/helm $HOME/.local/bin/
-            rm -rf linux-amd64 helm.tar.gz
-          fi
-          export PATH="$HOME/.local/bin:$PATH"
-          helm version --short
-
       - name: Verify kubeconfig
         run: kubectl get nodes
 
@@ -101,28 +81,21 @@ jobs:
             --docker-password="${{ secrets.CLOUDRU_REGISTRY_SK }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Deploy with Helm
+      - name: Deploy service
         run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          ENV="${{ needs.build.outputs.environment }}"
           TAG="${{ needs.build.outputs.tag }}"
           NAMESPACE="${{ needs.build.outputs.namespace }}"
-          RELEASE="${{ needs.build.outputs.release }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG}"
 
-          helm dependency update omnimap-helm/charts/omnimap
+          echo "Deploying ${{ env.SERVICE_NAME }} with tag ${TAG}"
 
-          if [[ "$ENV" == "dev" ]]; then
-            VALUES_FILE="omnimap-helm/charts/omnimap/values-cloudru-dev.yaml"
-          else
-            VALUES_FILE="omnimap-helm/charts/omnimap/values-cloudru-prod.yaml"
-          fi
+          # Update deployment using kubectl set image (no Helm lock conflicts)
+          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+            sync=${IMAGE} \
+            -n "${NAMESPACE}"
 
-          helm upgrade --install ${RELEASE} omnimap-helm/charts/omnimap \
-            --namespace "${NAMESPACE}" \
-            -f "${VALUES_FILE}" \
-            --set ${{ env.HELM_VALUE_KEY }}.image.tag=${TAG} \
-            --atomic \
-            --timeout 5m
+          # Wait for rollout
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n "${NAMESPACE}" --timeout=5m
 
       - name: Show status
         if: always()
@@ -132,4 +105,4 @@ jobs:
           kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=${{ env.SERVICE_NAME }} || true
           echo ""
           echo "=== Deployment ==="
-          kubectl get deployment -n "${NAMESPACE}" | grep -E "NAME|${{ env.SERVICE_NAME }}" || true
+          kubectl get deployment -n "${NAMESPACE}" | grep -E "NAME|${{ env.DEPLOYMENT_NAME }}" || true
