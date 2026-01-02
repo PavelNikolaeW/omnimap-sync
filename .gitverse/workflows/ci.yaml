@@ -22,6 +22,9 @@ env:
   HELM_VALUE_KEY: sync
 
 jobs:
+  # =============================================================================
+  # Build and Push Docker Image
+  # =============================================================================
   build:
     name: Build
     runs-on: self-hosted
@@ -61,6 +64,9 @@ jobs:
           docker push ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG}
           echo "Pushed ${{ env.SERVICE_NAME }}:${TAG}"
 
+  # =============================================================================
+  # Deploy to Kubernetes
+  # =============================================================================
   deploy:
     name: Deploy to ${{ needs.build.outputs.environment }}
     needs: build
@@ -68,28 +74,41 @@ jobs:
     runs-on: self-hosted
     steps:
       - name: Checkout Helm repo
-        uses: actions/checkout@v4
-        with:
-          repository: PavelNikolaeW/omnimap-helm
-          ref: main
+        run: |
+          git clone https://oauth2:${{ secrets.TOKEN_RUNNER }}@gitverse.ru/PavelNikolaeW/omnimap-helm.git
+          cd omnimap-helm
 
       - name: Setup Helm
         run: |
           if ! command -v helm &> /dev/null; then
-            curl -fsSL https://get.helm.sh/helm-v3.14.0-darwin-amd64.tar.gz -o helm.tar.gz
+            curl -fsSL https://get.helm.sh/helm-v3.14.0-linux-amd64.tar.gz -o helm.tar.gz
             tar -zxvf helm.tar.gz
             mkdir -p $HOME/.local/bin
-            mv darwin-amd64/helm $HOME/.local/bin/
-            rm -rf darwin-amd64 helm.tar.gz
+            mv linux-amd64/helm $HOME/.local/bin/
+            rm -rf linux-amd64 helm.tar.gz
           fi
           export PATH="$HOME/.local/bin:$PATH"
           helm version --short
 
-      - name: Setup kubeconfig
+      - name: Verify kubeconfig
         run: |
-          mkdir -p ~/.kube
-          echo "${{ secrets.CLOUDRU_KUBECONFIG }}" | base64 -d > ~/.kube/config
-          chmod 600 ~/.kube/config
+          # Kubeconfig is pre-configured on the runner VM
+          kubectl get nodes
+
+      - name: Setup ImagePullSecret
+        run: |
+          NAMESPACE="${{ needs.build.outputs.namespace }}"
+
+          # Create namespace if not exists
+          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Create/update registry secret
+          kubectl create secret docker-registry omnimap-registry-secret \
+            --namespace "${NAMESPACE}" \
+            --docker-server=omnimap-registry.cr.cloud.ru \
+            --docker-username="${{ secrets.CLOUDRU_REGISTRY_AK }}" \
+            --docker-password="${{ secrets.CLOUDRU_REGISTRY_SK }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Deploy with Helm
         run: |
@@ -98,17 +117,30 @@ jobs:
           TAG="${{ needs.build.outputs.tag }}"
           NAMESPACE="${{ needs.build.outputs.namespace }}"
 
-          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          helm dependency update charts/omnimap
+          # Update Helm dependencies
+          helm dependency update omnimap-helm/charts/omnimap
 
-          helm upgrade --install omnimap-${ENV} charts/omnimap \
+          # Select values file based on environment
+          if [[ "$ENV" == "dev" ]]; then
+            VALUES_FILE="omnimap-helm/charts/omnimap/values-cloudru-dev.yaml"
+          else
+            VALUES_FILE="omnimap-helm/charts/omnimap/values-cloudru-prod.yaml"
+          fi
+
+          # Deploy only this service (update image tag)
+          helm upgrade --install omnimap-${ENV} omnimap-helm/charts/omnimap \
             --namespace "${NAMESPACE}" \
-            -f charts/omnimap/values-${ENV}.yaml \
+            -f "${VALUES_FILE}" \
             --set ${{ env.HELM_VALUE_KEY }}.image.tag=${TAG} \
             --wait \
-            --timeout 5m
+            --timeout 10m
 
       - name: Show status
         if: always()
         run: |
-          kubectl get pods -n "${{ needs.build.outputs.namespace }}" -l app.kubernetes.io/name=${{ env.SERVICE_NAME }} || true
+          NAMESPACE="${{ needs.build.outputs.namespace }}"
+          echo "=== Pods ==="
+          kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=${{ env.SERVICE_NAME }} || true
+          echo ""
+          echo "=== Deployment ==="
+          kubectl get deployment -n "${NAMESPACE}" | grep -E "NAME|${{ env.SERVICE_NAME }}" || true
