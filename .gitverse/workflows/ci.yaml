@@ -89,12 +89,17 @@ jobs:
 
           echo "Deploying ${{ env.SERVICE_NAME }} with tag ${TAG}"
 
-          # Update deployment using kubectl set image (no Helm lock conflicts)
+          # Scale down to free memory (Recreate strategy)
+          kubectl scale deployment/${{ env.DEPLOYMENT_NAME }} --replicas=0 -n "${NAMESPACE}"
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n "${NAMESPACE}" --timeout=2m
+
+          # Update image
           kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
             sync=${IMAGE} \
             -n "${NAMESPACE}"
 
-          # Wait for rollout
+          # Scale up
+          kubectl scale deployment/${{ env.DEPLOYMENT_NAME }} --replicas=1 -n "${NAMESPACE}"
           kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n "${NAMESPACE}" --timeout=5m
 
       - name: Show status
