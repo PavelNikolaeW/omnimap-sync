@@ -1,8 +1,7 @@
 # CI/CD for omnimap-sync service
 #
-# Triggers:
-#   - main branch -> deploy to DEV (namespace: omnimap)
-#   - release/* branch -> deploy to PROD (namespace: omnimap-prod)
+# Triggers deployment via helm repo (GitOps)
+# Actual build and deploy logic is in omnimap-helm repo
 
 name: CI/CD Sync
 
@@ -10,104 +9,30 @@ on:
   push:
     branches:
       - main
-      - 'release/*'
-  pull_request:
-    branches:
-      - main
   workflow_dispatch:
 
-env:
-  REGISTRY: omnimap-registry.cr.cloud.ru/omnimap
-  SERVICE_NAME: omnimap-sync
-  DEPLOYMENT_NAME: omnimap-sync
-
 jobs:
-  build:
-    name: Build
+  trigger-deploy:
+    name: Trigger Deploy
     runs-on: self-hosted
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-      environment: ${{ steps.meta.outputs.environment }}
-      namespace: ${{ steps.meta.outputs.namespace }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Calculate metadata
-        id: meta
+      - name: Get commit info
+        id: commit
         run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
-          COMMIT=$(git rev-parse --short HEAD)
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
-          if [[ "$BRANCH" == "main" ]]; then
-            echo "tag=dev-${COMMIT}" >> $GITHUB_OUTPUT
-            echo "environment=dev" >> $GITHUB_OUTPUT
-            echo "namespace=omnimap" >> $GITHUB_OUTPUT
-          elif [[ "$BRANCH" == release/* ]]; then
-            VERSION="${BRANCH#release/}"
-            echo "tag=${VERSION}-${COMMIT}" >> $GITHUB_OUTPUT
-            echo "environment=prod" >> $GITHUB_OUTPUT
-            echo "namespace=omnimap-prod" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Login to Registry
+      - name: Trigger helm repo deploy
         run: |
-          echo "${{ secrets.CLOUDRU_REGISTRY_SK }}" | docker login omnimap-registry.cr.cloud.ru -u "${{ secrets.CLOUDRU_REGISTRY_AK }}" --password-stdin
-
-      - name: Build and Push
-        run: |
-          TAG="${{ steps.meta.outputs.tag }}"
-          docker build -t ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG} .
-          docker push ${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG}
-          echo "Pushed ${{ env.SERVICE_NAME }}:${TAG}"
-
-  deploy:
-    name: Deploy to ${{ needs.build.outputs.environment }}
-    needs: build
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    runs-on: self-hosted
-    steps:
-      - name: Verify kubeconfig
-        run: kubectl get nodes
-
-      - name: Setup ImagePullSecret
-        run: |
-          NAMESPACE="${{ needs.build.outputs.namespace }}"
-          kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-          kubectl create secret docker-registry omnimap-registry-secret \
-            --namespace "${NAMESPACE}" \
-            --docker-server=omnimap-registry.cr.cloud.ru \
-            --docker-username="${{ secrets.CLOUDRU_REGISTRY_AK }}" \
-            --docker-password="${{ secrets.CLOUDRU_REGISTRY_SK }}" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Deploy service
-        run: |
-          TAG="${{ needs.build.outputs.tag }}"
-          NAMESPACE="${{ needs.build.outputs.namespace }}"
-          IMAGE="${{ env.REGISTRY }}/${{ env.SERVICE_NAME }}:${TAG}"
-
-          echo "Deploying ${{ env.SERVICE_NAME }} with tag ${TAG}"
-
-          # Scale down to free memory (Recreate strategy)
-          kubectl scale deployment/${{ env.DEPLOYMENT_NAME }} --replicas=0 -n "${NAMESPACE}"
-          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n "${NAMESPACE}" --timeout=2m
-
-          # Update image
-          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
-            sync=${IMAGE} \
-            -n "${NAMESPACE}"
-
-          # Scale up
-          kubectl scale deployment/${{ env.DEPLOYMENT_NAME }} --replicas=1 -n "${NAMESPACE}"
-          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n "${NAMESPACE}" --timeout=5m
-
-      - name: Show status
-        if: always()
-        run: |
-          NAMESPACE="${{ needs.build.outputs.namespace }}"
-          echo "=== Pods ==="
-          kubectl get pods -n "${NAMESPACE}" -l app.kubernetes.io/name=${{ env.SERVICE_NAME }} || true
-          echo ""
-          echo "=== Deployment ==="
-          kubectl get deployment -n "${NAMESPACE}" | grep -E "NAME|${{ env.DEPLOYMENT_NAME }}" || true
+          # GitVerse API: workflow_dispatch via API
+          # API base: api.gitverse.ru (NOT gitverse.ru/api/v1)
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
+            -H "Accept: application/vnd.gitverse.object+json;version=1" \
+            "https://api.gitverse.ru/repos/PavelNikolaeW/omnimap-helm/actions/workflows/deploy-sync.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Triggered deploy-sync.yml in omnimap-helm"
