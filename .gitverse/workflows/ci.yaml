@@ -27,12 +27,19 @@ jobs:
 
       - name: Trigger helm repo deploy
         run: |
-          # GitVerse API: workflow_dispatch via API
-          # API base: api.gitverse.ru (NOT gitverse.ru/api/v1)
-          curl -X POST \
+          echo "Triggering deploy workflow..."
+          HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
             -H "Accept: application/vnd.gitverse.object+json;version=1" \
             "https://api.gitverse.ru/repos/PavelNikolaeW/omnimap-helm/actions/workflows/deploy-sync.yml/dispatches" \
-            -d '{"ref":"main"}'
-          echo "Triggered deploy-sync.yml in omnimap-helm"
+            -d '{"ref":"main"}')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "204" ]; then
+            echo "ERROR: Failed to trigger workflow"
+            cat /tmp/response.txt
+            exit 1
+          fi
+          echo "Successfully triggered deploy workflow"
+
