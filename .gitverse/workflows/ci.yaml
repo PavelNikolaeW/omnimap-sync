@@ -27,7 +27,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
             -H "Accept: application/vnd.gitverse.object+json;version=1" \
             "https://api.gitverse.ru/repos/PavelNikolaeW/omnimap-helm/actions/workflows/deploy-service.yml/dispatches" \
-            -d '{"ref":"main","inputs":{"service":"sync"}}')
+            -d '{"service":"sync"}')
 
           echo "HTTP Status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "204" ]; then
