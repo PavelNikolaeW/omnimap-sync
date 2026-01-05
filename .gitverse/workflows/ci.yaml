@@ -19,27 +19,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get commit info
-        id: commit
-        run: |
-          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
       - name: Trigger helm repo deploy
         run: |
-          echo "Triggering deploy workflow..."
+          echo "Triggering deploy-service.yml for sync..."
           HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${{ secrets.DEPLOY_TOKEN }}" \
             -H "Accept: application/vnd.gitverse.object+json;version=1" \
-            "https://api.gitverse.ru/repos/PavelNikolaeW/omnimap-helm/actions/workflows/deploy-sync.yml/dispatches" \
-            -d '{"ref":"main"}')
-          
+            "https://api.gitverse.ru/repos/PavelNikolaeW/omnimap-helm/actions/workflows/deploy-service.yml/dispatches" \
+            -d '{"ref":"main","inputs":{"service":"sync"}}')
+
           echo "HTTP Status: $HTTP_CODE"
           if [ "$HTTP_CODE" != "204" ]; then
             echo "ERROR: Failed to trigger workflow"
             cat /tmp/response.txt
             exit 1
           fi
-          echo "Successfully triggered deploy workflow"
-
+          echo "Successfully triggered deploy workflow for sync"
