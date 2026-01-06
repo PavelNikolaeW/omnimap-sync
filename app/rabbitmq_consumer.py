@@ -269,7 +269,8 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
     """
     Process block unsubscription (removes blocks entirely).
 
-    Removes blocks from all user subscriptions and deletes block data from Redis.
+    Sends deletion notifications to all subscribers, then removes blocks
+    from all user subscriptions and deletes block data from Redis.
     """
     try:
         msg = UnsubscribeMessage(**message_data)
@@ -292,9 +293,22 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
 
             # Build mapping: user_id -> set(block_uuid)
             user_blocks: dict[str, set[str]] = defaultdict(set)
+            all_subscribers: set[str] = set()
             for block_uuid, user_ids in zip(chunk, results):
+                all_subscribers.update(user_ids)
                 for user_id in user_ids:
                     user_blocks[user_id].add(block_uuid)
+
+            # Send deletion notifications to all subscribers BEFORE removing from Redis
+            for block_uuid in chunk:
+                response = BlockUpdateResponse(
+                    block_uuid=block_uuid,
+                    data={"id": block_uuid, "deleted": True}
+                )
+                await connection_manager.send_message_to_subscribers(
+                    response.model_dump(),
+                    all_subscribers
+                )
 
             # Remove block_uuids from user subscriptions
             pipe = redis.pipeline(transaction=True)

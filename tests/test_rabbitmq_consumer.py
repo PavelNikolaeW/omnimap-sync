@@ -355,11 +355,51 @@ class TestActionUnsubscribe:
         message = {"block_uuids": ["block-1", "block-2"]}
 
         with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
-            await action_unsubscribe(message)
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_unsubscribe(message)
 
         pipe = mock_redis.pipeline.return_value
         # Should call delete for block keys
         assert pipe.delete.called or pipe.execute.called
+
+    @pytest.mark.asyncio
+    async def test_action_unsubscribe_sends_deletion_notifications(self, mock_redis):
+        """Test that unsubscribe sends deletion notifications to all subscribers."""
+        message = {"block_uuids": ["block-1", "block-2"]}
+
+        # Setup pipeline to return subscribers
+        pipe = AsyncMock()
+        pipe.smembers = MagicMock()
+        pipe.srem = MagicMock()
+        pipe.delete = MagicMock()
+        # Return subscribers for each block
+        pipe.execute = AsyncMock(side_effect=[
+            [{"user_1", "user_2"}, {"user_2", "user_3"}],  # smembers results
+            [],  # srem + delete results
+        ])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_unsubscribe(message)
+
+        # Should call send_message_to_subscribers for each block
+        assert mock_cm.send_message_to_subscribers.call_count == 2
+
+        # Check that deletion notifications are sent correctly
+        calls = mock_cm.send_message_to_subscribers.call_args_list
+        for i, call in enumerate(calls):
+            message_sent = call[0][0]
+            subscribers = call[0][1]
+            assert message_sent["type"] == "block_update"
+            assert message_sent["data"]["deleted"] is True
+            assert message_sent["data"]["id"] in ["block-1", "block-2"]
+            # All unique subscribers from all blocks
+            assert subscribers == {"user_1", "user_2", "user_3"}
 
     @pytest.mark.asyncio
     async def test_action_unsubscribe_missing_block_uuids(self, mock_redis):
@@ -370,6 +410,34 @@ class TestActionUnsubscribe:
             await action_unsubscribe(message)
 
         mock_redis.pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_action_unsubscribe_no_subscribers_no_notifications(self, mock_redis):
+        """Test that no notifications are sent when there are no subscribers."""
+        message = {"block_uuids": ["block-1"]}
+
+        # Setup pipeline to return empty subscribers
+        pipe = AsyncMock()
+        pipe.smembers = MagicMock()
+        pipe.srem = MagicMock()
+        pipe.delete = MagicMock()
+        pipe.execute = AsyncMock(side_effect=[
+            [set()],  # No subscribers
+            [],  # delete results
+        ])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_unsubscribe(message)
+
+        # Still calls send_message_to_subscribers but with empty set
+        assert mock_cm.send_message_to_subscribers.call_count == 1
+        call_args = mock_cm.send_message_to_subscribers.call_args
+        assert call_args[0][1] == set()  # Empty subscribers
 
 
 class TestHandleMessage:
