@@ -1,10 +1,18 @@
-name: Claude Code Review
+name: Claude Review (omnimap-sync)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
-  issue_comment:
-    types: [created]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Claude model (use Opus for hard PRs)"
+        required: false
+        default: "claude-sonnet-4-5-20250929"
+
+concurrency:
+  group: claude-review-omnimap-sync-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   review:
@@ -13,31 +21,123 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
+
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+      rabbitmq:
+        image: rabbitmq:3-management
+        ports: ["5672:5672", "15672:15672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 30
+
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: PR Review
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps + fast checks (best-effort)
+        shell: bash
+        env:
+          HOST: "0.0.0.0"
+          PORT: "7999"
+          REDIS_URL: "redis://127.0.0.1:6379/0"
+          RABBITMQ_URL: "amqp://guest:guest@127.0.0.1:5672/"
+          AUTH_SERVICE_URL: "http://127.0.0.1:8000/api/v1/auth/verify" # placeholder; tests should mock
+          JWT_SECRET_KEY: "ci-jwt-secret"
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+
+          echo "== Detect incoming tasks file =="
+          if [ -f SYNC_TASKS.md ]; then
+            echo "SYNC_TASKS.md exists (incoming tasks)."
+          fi
+
+          echo "== Install deps =="
+          if [ -f pyproject.toml ] && grep -q "tool.poetry" pyproject.toml; then
+            pip install poetry
+            poetry install --no-interaction
+            echo "== Optional: lint/typecheck if configured =="
+            poetry run ruff check . || true
+            poetry run ruff format --check . || true
+            poetry run mypy . || true
+            echo "== Tests (preferred: pytest tests/) =="
+            poetry run pytest tests/ -q || true
+          elif [ -f pyproject.toml ]; then
+            pip install -e ".[dev]" || pip install -e .
+            ruff check . || true
+            ruff format --check . || true
+            mypy . || true
+            pytest tests/ -q || true
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+            [ -f requirements-dev.txt ] && pip install -r requirements-dev.txt || true
+            pytest tests/ -q || true
+          else
+            echo "No pyproject.toml/requirements.txt found; skipping installs."
+          fi
+
+      - name: Claude PR review (strict, sync rules)
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: |
+            --model ${{ inputs.model || 'claude-sonnet-4-5-20250929' }}
+            --max-turns 40
+            --allowedTools "Read" "Glob" "Grep" "Bash(gh pr:*)" "Bash(gh api:*)" "Bash(git:*)" "Bash(pytest:*)" "Bash(poetry:*)" "Bash(pip:*)" "Bash(python:*)" "Bash(ruff:*)" "Bash(mypy:*)"
           prompt: |
-            Review PR #${{ github.event.pull_request.number }} for code quality, potential bugs, and best practices.
+            You are a STRICT reviewer for OmniMap Sync (FastAPI WebSocket real-time sync service: Redis pub/sub, RabbitMQ consumer, JWT).
+            No rubber-stamp. Never APPROVE.
 
-            Steps:
-            1. Run 'gh pr diff ${{ github.event.pull_request.number }}' to see all changes
-            2. Read the modified files to understand context
-            3. Analyze the changes for:
-               - Code correctness and logic errors
-               - Potential bugs or edge cases
-               - Performance considerations
-               - Security issues
-               - Code style and maintainability
+            Repo rules you must enforce:
+            - Development happens in feature/fix branches; never suggest committing to main.
+            - NEVER change other services directly (omnimap-back/front/llm-gateway).
+              If changes require them: require creating FRONTEND_TASKS.md or BACKEND_TASKS.md with concrete tasks and mention it in PR.
 
-            4. IMPORTANT: You MUST submit a PR review comment using:
-               gh pr review ${{ github.event.pull_request.number }} --comment --body "YOUR_REVIEW_HERE"
+            Required workflow:
+            1) gh pr diff ${{ github.event.pull_request.number }}
+            2) gh pr view ${{ github.event.pull_request.number }} --json files --jq '.files[].path'
+            3) Read ALL modified files and any referenced code.
 
-               If the code looks good, still leave a brief approval comment.
-               If there are issues, describe them clearly.
+            Architecture areas to inspect when touched:
+            - app/main.py (app init, lifespan, routing, settings)
+            - app/websocket.py (connection lifecycle, subscriptions, broadcast, backpressure)
+            - app/auth.py (JWT verification, authz, claims validation, clock skew)
+            - app/redis_client.py (pub/sub correctness, reconnects, message fanout)
+            - app/rabbitmq.py (consumer acks, reconnect, prefetch, ordering, schema)
+
+            Mandatory checks:
+            - Correctness: concurrency/races, subscription isolation, message routing, schema validation
+            - Reliability: reconnect strategies, retries, idempotency, cancellation, bounded queues, timeouts
+            - Security: JWT validation, token leakage in logs, auth service calls (SSRF/timeout), origin checks for WS
+            - Performance: per-connection overhead, broadcast fanout, unbounded loops/queues, JSON encoding hotspots
+
+            CI evidence rules:
+            - If tests/lint/typecheck did not run or results are unclear: REQUEST_CHANGES and specify exact commands to run (prefer: `pytest tests/ -v --tb=short`).
+            - If any external deps are required (redis/rabbitmq/auth service) and tests don't mock them, request improvements.
+
+            Output format (required):
+            1) Summary (1-3 bullets)
+            2) High-risk issues (file + snippet/line context + why + concrete fix)
+            3) Medium/low issues (same)
+            4) Suggested tests to add (>=2; include exact pytest paths/names, e.g. tests/test_websocket.py::...)
+            5) Cross-service impact + required tasks file items (if any)
+
+            Submit:
+              - REQUEST_CHANGES if any high/medium issue or uncertainty
+              - otherwise COMMENT (never APPROVE)
+            Use:
+              gh pr review ${{ github.event.pull_request.number }} --request-changes -b "<body>"
+              OR
+              gh pr review ${{ github.event.pull_request.number }} --comment -b "<body>"
