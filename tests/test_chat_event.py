@@ -76,7 +76,7 @@ class TestActionChatEvent:
 
     @pytest.mark.asyncio
     async def test_action_chat_event_dm(self, mock_connection_manager):
-        """Test chat_event with type=dm."""
+        """Test chat_event with type=dm sends to both recipient and sender."""
         from app.rabbitmq_consumer import action_chat_event
 
         message_data = {
@@ -94,11 +94,64 @@ class TestActionChatEvent:
         with patch('app.rabbitmq_consumer.connection_manager', mock_connection_manager):
             await action_chat_event(message_data)
 
+        # Should be called twice: once for recipient, once for sender echo
+        assert mock_connection_manager.send_to_user.call_count == 2
+
+        # Check first call (recipient)
+        first_call = mock_connection_manager.send_to_user.call_args_list[0]
+        assert first_call[0][0] == "456"  # recipient_id as string
+        response_data = first_call[0][1]
+        assert response_data["type"] == "chat_event"
+        assert response_data["event_type"] == "dm"
+        assert response_data["data"]["recipient_id"] == 456
+        assert response_data["data"]["sender_id"] == 123
+        assert response_data["data"]["message"]["recipient_id"] == 456
+
+        # Check second call (sender echo)
+        second_call = mock_connection_manager.send_to_user.call_args_list[1]
+        assert second_call[0][0] == "123"  # sender_id as string
+
+    @pytest.mark.asyncio
+    async def test_action_chat_event_dm_self_message(self, mock_connection_manager):
+        """Test chat_event DM to self (sender == recipient) sends only once."""
+        from app.rabbitmq_consumer import action_chat_event
+
+        message_data = {
+            "action": "chat_event",
+            "type": "dm",
+            "sender_id": 123,
+            "recipient_id": 123,  # Same as sender
+            "message": {"id": "msg_1", "content": "Note to self"}
+        }
+
+        with patch('app.rabbitmq_consumer.connection_manager', mock_connection_manager):
+            await action_chat_event(message_data)
+
+        # Should be called only once (recipient only, no duplicate for sender)
         mock_connection_manager.send_to_user.assert_called_once()
         call_args = mock_connection_manager.send_to_user.call_args
-        assert call_args[0][0] == "456"  # recipient_id as string
-        assert call_args[0][1]["type"] == "chat_event"
-        assert call_args[0][1]["event_type"] == "dm"
+        assert call_args[0][0] == "123"
+
+    @pytest.mark.asyncio
+    async def test_action_chat_event_dm_no_sender_id(self, mock_connection_manager):
+        """Test chat_event DM without sender_id sends only to recipient."""
+        from app.rabbitmq_consumer import action_chat_event
+
+        message_data = {
+            "action": "chat_event",
+            "type": "dm",
+            "recipient_id": 456,
+            "message": {"id": "msg_1", "content": "System message"}
+            # No sender_id
+        }
+
+        with patch('app.rabbitmq_consumer.connection_manager', mock_connection_manager):
+            await action_chat_event(message_data)
+
+        # Should be called only once (recipient only)
+        mock_connection_manager.send_to_user.assert_called_once()
+        call_args = mock_connection_manager.send_to_user.call_args
+        assert call_args[0][0] == "456"
 
     @pytest.mark.asyncio
     async def test_action_chat_event_dm_missing_recipient(self, mock_connection_manager):
