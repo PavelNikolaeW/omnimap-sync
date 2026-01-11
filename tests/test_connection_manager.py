@@ -359,17 +359,26 @@ class TestOnlineStatusTracking(TestConnectionManager):
 
     @pytest.mark.asyncio
     async def test_connect_increments_online_counter(self, manager, mock_ws):
-        """Test that connect increments Redis online counter."""
+        """Test that connect increments Redis online counter using pipeline."""
         user_id = "user_123"
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.incr = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
             mock_get_redis.return_value = mock_redis
 
             await manager.connect(user_id, mock_ws)
 
-            mock_redis.incr.assert_called_once_with("user_online:user_123")
-            mock_redis.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
+            mock_redis.pipeline.assert_called_once_with(transaction=True)
+            mock_pipe.incr.assert_called_once_with("user_online:user_123")
+            mock_pipe.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
+            mock_pipe.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connect_skips_anonymous_user(self, manager, mock_ws):
@@ -443,28 +452,27 @@ class TestOnlineStatusTracking(TestConnectionManager):
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
-            mock_redis.exists.return_value = True
+            mock_redis.expire.return_value = 1  # Key exists, TTL was set
             mock_get_redis.return_value = mock_redis
 
             await manager.refresh_user_online_ttl(user_id)
 
-            mock_redis.exists.assert_called_once_with("user_online:user_123")
             mock_redis.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
 
     @pytest.mark.asyncio
-    async def test_refresh_user_online_ttl_skips_if_not_exists(self, manager):
-        """Test that refresh_user_online_ttl does nothing if key doesn't exist."""
+    async def test_refresh_user_online_ttl_key_not_exists(self, manager):
+        """Test that refresh_user_online_ttl handles non-existent key gracefully."""
         user_id = "user_123"
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
-            mock_redis.exists.return_value = False
+            mock_redis.expire.return_value = 0  # Key doesn't exist
             mock_get_redis.return_value = mock_redis
 
+            # Should not raise, just silently handle
             await manager.refresh_user_online_ttl(user_id)
 
-            mock_redis.exists.assert_called_once()
-            mock_redis.expire.assert_not_called()
+            mock_redis.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
 
     @pytest.mark.asyncio
     async def test_refresh_user_online_ttl_skips_anonymous(self, manager):
@@ -516,6 +524,13 @@ class TestOnlineStatusTracking(TestConnectionManager):
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.incr = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
             mock_redis.decr.side_effect = [1, 0]  # First disconnect: 1, second: 0
             mock_get_redis.return_value = mock_redis
 
@@ -523,7 +538,7 @@ class TestOnlineStatusTracking(TestConnectionManager):
             await manager.connect(user_id, mock_ws)
             await manager.connect(user_id, mock_ws_2)
 
-            assert mock_redis.incr.call_count == 2
+            assert mock_pipe.incr.call_count == 2
 
             # Disconnect first device
             await manager.disconnect(user_id, mock_ws)

@@ -249,14 +249,17 @@ class ConnectionManager:
         """
         Increment the online counter for a user in Redis.
 
+        Uses pipeline with transaction to ensure atomicity of incr + expire.
         Sets TTL to auto-expire if no activity (protection against crashes).
         Gracefully handles Redis errors to not block connections.
         """
         try:
             redis = await get_redis_pool()
             key = f"{ONLINE_STATUS_KEY_PREFIX}{user_id}"
-            await redis.incr(key)
-            await redis.expire(key, settings.ONLINE_STATUS_TTL)
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.incr(key)
+                pipe.expire(key, settings.ONLINE_STATUS_TTL)
+                await pipe.execute()
             logger.debug(f"Incremented online counter for user {user_id}")
         except Exception:
             logger.exception(f"Failed to increment online counter for user {user_id}")
@@ -266,6 +269,7 @@ class ConnectionManager:
         Decrement the online counter for a user in Redis.
 
         If counter reaches 0 or below, deletes the key.
+        Logs warning if counter goes negative (indicates missed increment).
         Gracefully handles Redis errors.
         """
         try:
@@ -274,7 +278,13 @@ class ConnectionManager:
             current = await redis.decr(key)
             if current <= 0:
                 await redis.delete(key)
-                logger.debug(f"Deleted online counter for user {user_id} (was offline)")
+                if current < 0:
+                    logger.warning(
+                        f"Online counter went negative for user {user_id}, cleaned up. "
+                        "This may indicate a missed increment (server crash or Redis flush)."
+                    )
+                else:
+                    logger.debug(f"User {user_id} went offline (counter reached 0)")
             else:
                 logger.debug(f"Decremented online counter for user {user_id}, remaining: {current}")
         except Exception:
@@ -294,10 +304,9 @@ class ConnectionManager:
         try:
             redis = await get_redis_pool()
             key = f"{ONLINE_STATUS_KEY_PREFIX}{user_id}"
-            # Only refresh if key exists (user is online)
-            exists = await redis.exists(key)
-            if exists:
-                await redis.expire(key, settings.ONLINE_STATUS_TTL)
+            # expire() returns 1 if TTL was set, 0 if key doesn't exist
+            result = await redis.expire(key, settings.ONLINE_STATUS_TTL)
+            if result:
                 logger.debug(f"Refreshed online TTL for user {user_id}")
         except Exception:
             logger.exception(f"Failed to refresh online TTL for user {user_id}")
