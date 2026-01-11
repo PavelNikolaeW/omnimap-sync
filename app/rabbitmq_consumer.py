@@ -369,25 +369,41 @@ async def action_chat_event(message_data: dict[str, Any]) -> None:
     event_type = msg.type
 
     if event_type == "dm":
-        # Direct message: send to recipient only
+        # Direct message: send to recipient and sender (for multi-device sync)
         if not msg.recipient_id:
             logger.error("DM chat_event missing recipient_id")
             return
 
         recipient_id = str(msg.recipient_id)
+        sender_id = str(msg.sender_id) if msg.sender_id else None
+
+        # Add recipient_id to message object for frontend to identify chat context
+        message_with_recipient = msg.message.copy() if msg.message else {}
+        message_with_recipient["recipient_id"] = msg.recipient_id
+
         response = ChatEventResponse(
             event_type="dm",
             data={
                 "sender_id": msg.sender_id,
-                "message": msg.message
+                "recipient_id": msg.recipient_id,
+                "message": message_with_recipient
             }
         )
 
-        delivered = await connection_manager.send_to_user(recipient_id, response.model_dump())
-        if delivered:
-            logger.info(f"Chat DM delivered to user {recipient_id}")
+        response_data = response.model_dump()
+
+        # Send to recipient
+        delivered_to_recipient = await connection_manager.send_to_user(recipient_id, response_data)
+
+        # Send echo to sender (for multi-device sync)
+        delivered_to_sender = False
+        if sender_id and sender_id != recipient_id:
+            delivered_to_sender = await connection_manager.send_to_user(sender_id, response_data)
+
+        if delivered_to_recipient or delivered_to_sender:
+            logger.info(f"Chat DM delivered: recipient={delivered_to_recipient}, sender_echo={delivered_to_sender}")
         else:
-            logger.debug(f"Chat DM not delivered, user {recipient_id} is offline")
+            logger.debug(f"Chat DM not delivered, both users offline")
 
     elif event_type == "group_message":
         # Group message: send to all members except sender
