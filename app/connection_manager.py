@@ -9,11 +9,15 @@ from typing import Any
 from starlette.websockets import WebSocket
 
 from app.config import settings
+from app.redis_client import get_redis_pool
 
 logger = logging.getLogger("realtime_service")
 
 # Anonymous user ID as string (user_id in ConnectionManager is always str)
 ANON_USER_ID = str(settings.ANONIM_USER)
+
+# Redis key prefix for online status
+ONLINE_STATUS_KEY_PREFIX = "user_online:"
 
 
 class ConnectionManager:
@@ -52,6 +56,7 @@ class ConnectionManager:
         Add a new WebSocket connection for a user.
 
         Thread-safe operation using per-user locks.
+        Also tracks online status in Redis for non-anonymous users.
         """
         user_lock = await self._get_user_lock(user_id)
         async with user_lock:
@@ -61,11 +66,16 @@ class ConnectionManager:
             f"Total connections: {len(self.active_connections[user_id])}"
         )
 
+        # Track online status in Redis (skip anonymous users)
+        if user_id != ANON_USER_ID:
+            await self._increment_online_counter(user_id)
+
     async def disconnect(self, user_id: str, websocket: WebSocket) -> None:
         """
         Remove a WebSocket connection for a user.
 
         Cleans up user lock when all connections are closed.
+        Also decrements online status counter in Redis for non-anonymous users.
         """
         should_cleanup = False
 
@@ -87,6 +97,10 @@ class ConnectionManager:
             if not connections:
                 del self.active_connections[user_id]
                 should_cleanup = True
+
+        # Decrement online counter in Redis (skip anonymous users)
+        if user_id != ANON_USER_ID:
+            await self._decrement_online_counter(user_id)
 
         # Cleanup lock outside of user_lock to avoid holding lock while deleting it
         if should_cleanup:
@@ -228,3 +242,71 @@ class ConnectionManager:
                 # Exceptions are silently ignored (user treated as offline)
 
         return results
+
+    # --- Online Status Tracking Methods ---
+
+    async def _increment_online_counter(self, user_id: str) -> None:
+        """
+        Increment the online counter for a user in Redis.
+
+        Uses pipeline with transaction to ensure atomicity of incr + expire.
+        Sets TTL to auto-expire if no activity (protection against crashes).
+        Gracefully handles Redis errors to not block connections.
+        """
+        try:
+            redis = await get_redis_pool()
+            key = f"{ONLINE_STATUS_KEY_PREFIX}{user_id}"
+            async with redis.pipeline(transaction=True) as pipe:
+                pipe.incr(key)
+                pipe.expire(key, settings.ONLINE_STATUS_TTL)
+                await pipe.execute()
+            logger.debug(f"Incremented online counter for user {user_id}")
+        except Exception:
+            logger.exception(f"Failed to increment online counter for user {user_id}")
+
+    async def _decrement_online_counter(self, user_id: str) -> None:
+        """
+        Decrement the online counter for a user in Redis.
+
+        If counter reaches 0 or below, deletes the key.
+        Logs warning if counter goes negative (indicates missed increment).
+        Gracefully handles Redis errors.
+        """
+        try:
+            redis = await get_redis_pool()
+            key = f"{ONLINE_STATUS_KEY_PREFIX}{user_id}"
+            current = await redis.decr(key)
+            if current <= 0:
+                await redis.delete(key)
+                if current < 0:
+                    logger.warning(
+                        f"Online counter went negative for user {user_id}, cleaned up. "
+                        "This may indicate a missed increment (server crash or Redis flush)."
+                    )
+                else:
+                    logger.debug(f"User {user_id} went offline (counter reached 0)")
+            else:
+                logger.debug(f"Decremented online counter for user {user_id}, remaining: {current}")
+        except Exception:
+            logger.exception(f"Failed to decrement online counter for user {user_id}")
+
+    async def refresh_user_online_ttl(self, user_id: str) -> None:
+        """
+        Refresh the TTL on user's online status key.
+
+        Called on heartbeat/ping to prevent key expiration for active users.
+        Skips anonymous users.
+        Gracefully handles Redis errors.
+        """
+        if user_id == ANON_USER_ID:
+            return
+
+        try:
+            redis = await get_redis_pool()
+            key = f"{ONLINE_STATUS_KEY_PREFIX}{user_id}"
+            # expire() returns 1 if TTL was set, 0 if key doesn't exist
+            result = await redis.expire(key, settings.ONLINE_STATUS_TTL)
+            if result:
+                logger.debug(f"Refreshed online TTL for user {user_id}")
+        except Exception:
+            logger.exception(f"Failed to refresh online TTL for user {user_id}")

@@ -352,3 +352,198 @@ class TestAnonymousUserBug(TestConnectionManager):
         # So this condition in send_personal_message will never be True:
         # if user_id == settings.ANONIM_USER:
         # because user_id is always str
+
+
+class TestOnlineStatusTracking(TestConnectionManager):
+    """Tests for Redis-based online status tracking."""
+
+    @pytest.mark.asyncio
+    async def test_connect_increments_online_counter(self, manager, mock_ws):
+        """Test that connect increments Redis online counter using pipeline."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.incr = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+            mock_get_redis.return_value = mock_redis
+
+            await manager.connect(user_id, mock_ws)
+
+            mock_redis.pipeline.assert_called_once_with(transaction=True)
+            mock_pipe.incr.assert_called_once_with("user_online:user_123")
+            mock_pipe.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
+            mock_pipe.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_connect_skips_anonymous_user(self, manager, mock_ws):
+        """Test that connect does not track anonymous users."""
+        anon_user_id = str(settings.ANONIM_USER)
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.connect(anon_user_id, mock_ws)
+
+            mock_redis.incr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_decrements_online_counter(self, manager, mock_ws):
+        """Test that disconnect decrements Redis online counter."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.decr.return_value = 1  # Still has connections
+            mock_get_redis.return_value = mock_redis
+
+            await manager.connect(user_id, mock_ws)
+            mock_redis.reset_mock()
+
+            await manager.disconnect(user_id, mock_ws)
+
+            mock_redis.decr.assert_called_once_with("user_online:user_123")
+            mock_redis.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_deletes_counter_when_zero(self, manager, mock_ws):
+        """Test that disconnect deletes key when counter reaches zero."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.decr.return_value = 0  # No more connections
+            mock_get_redis.return_value = mock_redis
+
+            await manager.connect(user_id, mock_ws)
+            mock_redis.reset_mock()
+
+            await manager.disconnect(user_id, mock_ws)
+
+            mock_redis.decr.assert_called_once()
+            mock_redis.delete.assert_called_once_with("user_online:user_123")
+
+    @pytest.mark.asyncio
+    async def test_disconnect_skips_anonymous_user(self, manager, mock_ws):
+        """Test that disconnect does not track anonymous users."""
+        anon_user_id = str(settings.ANONIM_USER)
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.connect(anon_user_id, mock_ws)
+            mock_redis.reset_mock()
+
+            await manager.disconnect(anon_user_id, mock_ws)
+
+            mock_redis.decr.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refresh_user_online_ttl(self, manager):
+        """Test that refresh_user_online_ttl refreshes TTL."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.expire.return_value = 1  # Key exists, TTL was set
+            mock_get_redis.return_value = mock_redis
+
+            await manager.refresh_user_online_ttl(user_id)
+
+            mock_redis.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
+
+    @pytest.mark.asyncio
+    async def test_refresh_user_online_ttl_key_not_exists(self, manager):
+        """Test that refresh_user_online_ttl handles non-existent key gracefully."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.expire.return_value = 0  # Key doesn't exist
+            mock_get_redis.return_value = mock_redis
+
+            # Should not raise, just silently handle
+            await manager.refresh_user_online_ttl(user_id)
+
+            mock_redis.expire.assert_called_once_with("user_online:user_123", settings.ONLINE_STATUS_TTL)
+
+    @pytest.mark.asyncio
+    async def test_refresh_user_online_ttl_skips_anonymous(self, manager):
+        """Test that refresh_user_online_ttl skips anonymous users."""
+        anon_user_id = str(settings.ANONIM_USER)
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.refresh_user_online_ttl(anon_user_id)
+
+            mock_get_redis.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_redis_error_does_not_block_connect(self, manager, mock_ws):
+        """Test that Redis errors don't prevent connection."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_get_redis.side_effect = Exception("Redis unavailable")
+
+            # Should not raise, connection should still work
+            await manager.connect(user_id, mock_ws)
+
+            assert user_id in manager.active_connections
+            assert mock_ws in manager.active_connections[user_id]
+
+    @pytest.mark.asyncio
+    async def test_redis_error_does_not_block_disconnect(self, manager, mock_ws):
+        """Test that Redis errors don't prevent disconnection."""
+        user_id = "user_123"
+
+        # First connect without Redis mock
+        manager.active_connections[user_id].append(mock_ws)
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_get_redis.side_effect = Exception("Redis unavailable")
+
+            # Should not raise, disconnection should still work
+            await manager.disconnect(user_id, mock_ws)
+
+            assert user_id not in manager.active_connections
+
+    @pytest.mark.asyncio
+    async def test_multiple_devices_counter(self, manager, mock_ws, mock_ws_2):
+        """Test that counter correctly handles multiple devices."""
+        user_id = "user_123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.incr = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
+            mock_redis.decr.side_effect = [1, 0]  # First disconnect: 1, second: 0
+            mock_get_redis.return_value = mock_redis
+
+            # Connect two devices
+            await manager.connect(user_id, mock_ws)
+            await manager.connect(user_id, mock_ws_2)
+
+            assert mock_pipe.incr.call_count == 2
+
+            # Disconnect first device
+            await manager.disconnect(user_id, mock_ws)
+            assert mock_redis.delete.call_count == 0  # Still online
+
+            # Disconnect second device
+            await manager.disconnect(user_id, mock_ws_2)
+            assert mock_redis.delete.call_count == 1  # Now offline

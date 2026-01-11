@@ -106,6 +106,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             if action == "ping":
                 await websocket.send_json({"type": "pong"})
+                # Refresh online status TTL on heartbeat
+                await connection_manager.refresh_user_online_ttl(connection_id)
                 logger.debug(f"Pong sent to {connection_id}")
             elif action == "get_updates":
                 await handle_get_updates(websocket, connection_id, blocks)

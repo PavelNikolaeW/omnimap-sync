@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     block_portion: int = 500  # Chunk size for Redis pipeline operations
     MAX_CONCURRENT_SENDS: int = 10  # Semaphore limit for anonymous user
 
+    # Online status tracking
+    ONLINE_STATUS_TTL: int = 300  # TTL in seconds for user online status (5 minutes)
+
     # Special user IDs
     ANONIM_USER: int = -1  # Anonymous user ID
 
