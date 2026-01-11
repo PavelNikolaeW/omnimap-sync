@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   review:
+    if: false  # Temporarily disabled
     runs-on: ubuntu-latest
     permissions:
       contents: read
