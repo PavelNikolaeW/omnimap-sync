@@ -262,6 +262,26 @@ class TestActionUpdateAccess:
 
         mock_redis.pipeline.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_action_update_access_grant_passes_block_data(self, mock_redis):
+        """Test that block_data is passed to send_message_update_access."""
+        block_data = [{"id": "block-1", "title": "Test Block"}]
+        message = {
+            "user_id": "user_123",
+            "permission": "grant",
+            "start_block_ids": ["block-1"],
+            "block_uuids": ["block-1"],
+            "block_data": block_data
+        }
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.send_message_update_access", new_callable=AsyncMock) as mock_send:
+                await action_update_access(message)
+
+        mock_send.assert_called_once()
+        call_kwargs = mock_send.call_args.kwargs
+        assert call_kwargs.get("block_data") == block_data
+
 
 class TestActionSubscribe:
     """Tests for action_subscribe function."""
