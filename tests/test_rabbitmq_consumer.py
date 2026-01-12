@@ -624,6 +624,73 @@ class TestSendMessageUpdateAccess:
         assert message["type"] == "block_update_access"
         assert message["permission"] == "grant"
 
+    @pytest.mark.asyncio
+    async def test_send_message_update_access_grant_with_block_data_param(self, mock_redis):
+        """Test that grant permission uses block_data from message when provided."""
+        block_data = [{"id": "block-1", "title": "Test Block", "data": "{}"}]
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+
+            await send_message_update_access(
+                start_block_ids=["block-1"],
+                block_uuids=["block-1"],
+                user_id="user_123",
+                permission="grant",
+                redis=mock_redis,
+                block_data=block_data
+            )
+
+        mock_cm.send_personal_message.assert_called_once()
+        message = mock_cm.send_personal_message.call_args[0][0]
+        assert message["type"] == "block_update_access"
+        assert message["start_block_ids"] == block_data
+        # Redis pipeline should NOT be called when block_data is provided
+        mock_redis.pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_message_update_access_grant_redis_empty_no_block_data(self):
+        """Test that warning is logged when block_data missing and Redis empty."""
+        redis = AsyncMock()
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[{}])  # Empty Redis response
+        redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+
+            await send_message_update_access(
+                start_block_ids=["block-1"],
+                block_uuids=["block-1"],
+                user_id="user_123",
+                permission="grant",
+                redis=redis,
+                block_data=None
+            )
+
+        # Should NOT send message when no data available
+        mock_cm.send_personal_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_send_message_update_access_grant_fallback_to_redis(self, mock_redis):
+        """Test that grant falls back to Redis when block_data is None."""
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_personal_message = AsyncMock()
+
+            await send_message_update_access(
+                start_block_ids=["block-1"],
+                block_uuids=["block-1"],
+                user_id="user_123",
+                permission="grant",
+                redis=mock_redis,
+                block_data=None  # Explicit None
+            )
+
+        # Redis pipeline should be called as fallback
+        mock_redis.pipeline.assert_called_once()
+        mock_cm.send_personal_message.assert_called_once()
+
 
 class TestMessageHandlingFixed:
     """Tests verifying message handling works correctly after fix."""
