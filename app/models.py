@@ -26,6 +26,7 @@ class UpdateAccessMessage(BaseModel):
     permission: Literal["deny", "grant"]
     start_block_ids: list[str]
     block_uuids: list[str]
+    block_data: list[dict[str, Any]] | None = None  # Block data from backend (avoids Redis lookup)
 
 
 class SubscribeMessage(BaseModel):

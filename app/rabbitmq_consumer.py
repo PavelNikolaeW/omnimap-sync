@@ -158,23 +158,35 @@ async def send_message_update_access(
     block_uuids: list[str],
     user_id: str | int,
     permission: str,
-    redis: Redis
+    redis: Redis,
+    block_data: list[dict[str, Any]] | None = None
 ) -> None:
     """
     Send access update notification to user.
 
     For 'deny' permission, sends forbidden block data.
-    For other permissions, fetches actual block data from Redis.
+    For other permissions, uses block_data from message if available,
+    otherwise fetches from Redis (fallback for backwards compatibility).
     """
     if permission == "deny":
         data_list = [{**settings.FORBIDDEN_BLOCK, 'id': block_id} for block_id in start_block_ids]
+    elif block_data:
+        # Use block data provided by backend (preferred path)
+        data_list = block_data
+        logger.debug(f"Using block_data from message for {len(data_list)} blocks")
     else:
+        # Fallback: fetch from Redis (may be empty if block not cached)
         keys = [f'blockdata:{block_id}' for block_id in start_block_ids]
         pipe = redis.pipeline()
         for key in keys:
             pipe.hgetall(key)
         results = await pipe.execute()
         data_list = [parse_redis_block_data(data) for data in results if data]
+        if not data_list:
+            logger.warning(
+                f"Grant access: block_data not in message and not in Redis. "
+                f"User {user_id} won't receive block data for {start_block_ids}"
+            )
 
     if data_list:
         response = BlockUpdateAccessResponse(
@@ -183,8 +195,9 @@ async def send_message_update_access(
             permission=permission
         )
         await connection_manager.send_personal_message(response.model_dump(), str(user_id))
+        logger.info(f"Sent access update to user {user_id}: permission={permission}, blocks={len(data_list)}")
     else:
-        logger.warning('No messages to send for access update')
+        logger.warning(f'No block data to send for access update to user {user_id}')
 
 
 async def action_update_access(message_data: dict[str, Any]) -> None:
@@ -227,7 +240,8 @@ async def action_update_access(message_data: dict[str, Any]) -> None:
             block_uuids,
             user_id,
             msg.permission,
-            redis
+            redis,
+            block_data=msg.block_data
         )
     except Exception:
         logger.exception("Failed to update access permissions in Redis")
