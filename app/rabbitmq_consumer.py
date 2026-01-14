@@ -184,7 +184,7 @@ async def send_message_update_access(
         data_list = [parse_redis_block_data(data) for data in results if data]
         if not data_list:
             logger.warning(
-                f"Grant access: block_data not in message and not in Redis. "
+                f"Access update ({permission}): block_data not in message and not in Redis. "
                 f"User {user_id} won't receive block data for {start_block_ids}"
             )
 
@@ -205,7 +205,7 @@ async def action_update_access(message_data: dict[str, Any]) -> None:
     Process access permission update.
 
     For 'deny' permission: removes user from block subscribers.
-    For 'grant' permission: adds user to block subscribers.
+    For other permissions (view, edit, edit_ac, delete): adds user to block subscribers.
     """
     try:
         msg = UpdateAccessMessage(**message_data)
@@ -232,7 +232,7 @@ async def action_update_access(message_data: dict[str, Any]) -> None:
                     for block_uuid in chunk:
                         pipe.sadd(f"block:{block_uuid}", user_id)
                         pipe.sadd(f"subscriber:{user_id}:blocks", block_uuid)
-                    logger.info(f"User {user_id} access granted for {len(chunk)} blocks.")
+                    logger.info(f"User {user_id} access '{msg.permission}' set for {len(chunk)} blocks.")
                 await pipe.execute()
 
         await send_message_update_access(
