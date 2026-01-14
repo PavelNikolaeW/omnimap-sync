@@ -23,7 +23,7 @@ class UpdateBlocksMessage(BaseModel):
 class UpdateAccessMessage(BaseModel):
     """Message for updating user access permissions."""
     user_id: str | int
-    permission: Literal["deny", "grant"]
+    permission: Literal["deny", "view", "edit", "edit_ac", "delete"]
     start_block_ids: list[str]
     block_uuids: list[str]
     block_data: list[dict[str, Any]] | None = None  # Block data from backend (avoids Redis lookup)
