@@ -547,3 +547,253 @@ class TestOnlineStatusTracking(TestConnectionManager):
             # Disconnect second device
             await manager.disconnect(user_id, mock_ws_2)
             assert mock_redis.delete.call_count == 1  # Now offline
+
+
+class TestSandboxCaching(TestConnectionManager):
+    """Tests for sandbox mode caching methods."""
+
+    @pytest.mark.asyncio
+    async def test_update_sandbox_cache_private_mode(self, manager):
+        """Test that private sandbox is cached in Redis."""
+        block_uuid = "block-123"
+        sandbox_mode = "private"
+        creator_id = 456
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hset = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
+
+            mock_redis.hset.assert_called_once_with(
+                "sandbox:block-123",
+                mapping={"mode": "private", "creator_id": "456"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_sandbox_cache_open_mode(self, manager):
+        """Test that open sandbox is cached in Redis."""
+        block_uuid = "block-123"
+        sandbox_mode = "open"
+        creator_id = "789"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hset = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
+
+            mock_redis.hset.assert_called_once_with(
+                "sandbox:block-123",
+                mapping={"mode": "open", "creator_id": "789"}
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_sandbox_cache_none_mode_deletes(self, manager):
+        """Test that none sandbox mode deletes the cache key."""
+        block_uuid = "block-123"
+        sandbox_mode = "none"
+        creator_id = 456
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.delete = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
+
+            mock_redis.delete.assert_called_once_with("sandbox:block-123")
+
+    @pytest.mark.asyncio
+    async def test_update_sandbox_cache_empty_mode_deletes(self, manager):
+        """Test that empty sandbox mode deletes the cache key."""
+        block_uuid = "block-123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.delete = AsyncMock()
+            mock_get_redis.return_value = mock_redis
+
+            await manager.update_sandbox_cache(block_uuid, None, None)
+
+            mock_redis.delete.assert_called_once_with("sandbox:block-123")
+
+    @pytest.mark.asyncio
+    async def test_get_sandbox_info_returns_cached_data(self, manager):
+        """Test that get_sandbox_info returns cached sandbox data."""
+        block_uuid = "block-123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hgetall = AsyncMock(return_value={"mode": "private", "creator_id": "456"})
+            mock_get_redis.return_value = mock_redis
+
+            result = await manager.get_sandbox_info(block_uuid)
+
+            assert result == {"mode": "private", "creator_id": "456"}
+            mock_redis.hgetall.assert_called_once_with("sandbox:block-123")
+
+    @pytest.mark.asyncio
+    async def test_get_sandbox_info_returns_none_for_non_sandbox(self, manager):
+        """Test that get_sandbox_info returns None when not a sandbox."""
+        block_uuid = "block-123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hgetall = AsyncMock(return_value={})  # Empty = not a sandbox
+            mock_get_redis.return_value = mock_redis
+
+            result = await manager.get_sandbox_info(block_uuid)
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_sandbox_info_returns_none_for_none_mode(self, manager):
+        """Test that get_sandbox_info returns None for 'none' mode."""
+        block_uuid = "block-123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hgetall = AsyncMock(return_value={"mode": "none", "creator_id": "456"})
+            mock_get_redis.return_value = mock_redis
+
+            result = await manager.get_sandbox_info(block_uuid)
+
+            assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_sandbox_info_returns_none_for_empty_block_uuid(self, manager):
+        """Test that get_sandbox_info returns None for empty block_uuid."""
+        result = await manager.get_sandbox_info("")
+        assert result is None
+
+        result = await manager.get_sandbox_info(None)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_parent_sandbox_info_uses_cache(self, manager):
+        """Test that get_parent_sandbox_info checks cache first."""
+        parent_id = "parent-123"
+
+        with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
+            mock_redis = AsyncMock()
+            mock_redis.hgetall = AsyncMock(return_value={"mode": "private", "creator_id": "456"})
+            mock_get_redis.return_value = mock_redis
+
+            result = await manager.get_parent_sandbox_info(parent_id)
+
+            assert result == {"mode": "private", "creator_id": "456"}
+
+    @pytest.mark.asyncio
+    async def test_get_parent_sandbox_info_returns_none_for_empty_parent(self, manager):
+        """Test that get_parent_sandbox_info returns None for empty parent_id."""
+        result = await manager.get_parent_sandbox_info("")
+        assert result is None
+
+        result = await manager.get_parent_sandbox_info(None)
+        assert result is None
+
+    def test_filter_subscribers_for_private_sandbox_allows_creator(self, manager):
+        """Test that filter allows block creator."""
+        subscribers = {"user_1", "user_2", "user_3"}
+        block_creator_id = "user_2"
+        container_owner_id = "owner"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert "user_2" in result
+        assert "user_1" not in result
+        assert "user_3" not in result
+
+    def test_filter_subscribers_for_private_sandbox_allows_owner(self, manager):
+        """Test that filter allows container owner."""
+        subscribers = {"user_1", "user_2", "user_3"}
+        block_creator_id = "creator"
+        container_owner_id = "user_3"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert "user_3" in result
+        assert "user_1" not in result
+        assert "user_2" not in result
+
+    def test_filter_subscribers_for_private_sandbox_allows_both(self, manager):
+        """Test that filter allows both creator and owner."""
+        subscribers = {"user_1", "user_2", "owner"}
+        block_creator_id = "user_1"
+        container_owner_id = "owner"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert result == {"user_1", "owner"}
+
+    def test_filter_subscribers_for_private_sandbox_handles_int_creator_id(self, manager):
+        """Test that filter handles int creator_id."""
+        subscribers = {"123", "456", "789"}
+        block_creator_id = 123  # int
+        container_owner_id = "789"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert "123" in result
+        assert "789" in result
+
+    def test_filter_subscribers_for_private_sandbox_empty_set_returns_empty(self, manager):
+        """Test that filter returns empty set when no authorized users."""
+        subscribers = {"user_1", "user_2"}
+        block_creator_id = "other"
+        container_owner_id = "another"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert result == set()
+
+    def test_filter_subscribers_handles_none_creator_id(self, manager):
+        """Test that filter handles None creator_id."""
+        subscribers = {"user_1", "owner"}
+        block_creator_id = None
+        container_owner_id = "owner"
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert result == {"owner"}
+
+    def test_filter_subscribers_handles_none_owner_id(self, manager):
+        """Test that filter handles None owner_id."""
+        subscribers = {"creator", "user_1"}
+        block_creator_id = "creator"
+        container_owner_id = None
+
+        result = manager.filter_subscribers_for_private_sandbox(
+            subscribers,
+            block_creator_id,
+            container_owner_id
+        )
+
+        assert result == {"creator"}

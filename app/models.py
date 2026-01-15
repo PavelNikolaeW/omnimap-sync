@@ -40,6 +40,13 @@ class UnsubscribeMessage(BaseModel):
     block_uuids: list[str]
 
 
+class SandboxModeChangedMessage(BaseModel):
+    """Message when a block's sandbox mode changes."""
+    block_uuid: str
+    sandbox_mode: Literal["none", "open", "private"]
+    creator_id: int | str | None = None
+
+
 # =============================================================================
 # WebSocket Request Models (incoming from client)
 # =============================================================================
@@ -174,3 +181,10 @@ class PresenceBatchResponse(BaseModel):
     """Batch presence response for multiple users."""
     type: Literal["presence_response"] = "presence_response"
     users: list[dict[str, Any]]
+
+
+class SandboxModeChangedResponse(BaseModel):
+    """Response when a block's sandbox mode changes."""
+    type: Literal["sandbox_mode_changed"] = "sandbox_mode_changed"
+    block_uuid: str
+    sandbox_mode: str

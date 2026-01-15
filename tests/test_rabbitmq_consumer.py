@@ -12,6 +12,7 @@ from app.rabbitmq_consumer import (
     action_update_access,
     action_subscribe,
     action_unsubscribe,
+    action_sandbox_mode_changed,
     action_notification_event,
     handle_message,
     send_message_update_access,
@@ -1096,4 +1097,279 @@ class TestHandleMessageNotificationEvents:
 
         mock_block.assert_called_once()
         mock_notif.assert_not_called()
+        mock_message.ack.assert_called_once()
+
+
+class TestSandboxFiltering:
+    """Tests for sandbox mode filtering in update_block actions."""
+
+    @pytest.fixture
+    def mock_redis(self):
+        """Create a mock Redis client."""
+        redis = AsyncMock()
+        redis.hset = AsyncMock()
+        redis.smembers = AsyncMock(return_value=set())
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_action_update_block_updates_sandbox_cache(self, mock_redis):
+        """Test that sandbox containers are cached when updated."""
+        message = {
+            "block_uuid": "container-123",
+            "block_data": {
+                "title": "Sandbox Container",
+                "sandbox_mode": "private",
+                "creator_id": 456
+            }
+        }
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.get_parent_sandbox_info = AsyncMock(return_value=None)
+                await action_update_block(message)
+
+        mock_cm.update_sandbox_cache.assert_called_once_with(
+            "container-123", "private", 456
+        )
+
+    @pytest.mark.asyncio
+    async def test_action_update_block_filters_for_private_sandbox(self, mock_redis):
+        """Test that subscribers are filtered for blocks in private sandbox."""
+        message = {
+            "block_uuid": "block-123",
+            "block_data": {
+                "title": "Child Block",
+                "parent_id": "parent-123",
+                "creator_id": 100
+            }
+        }
+        mock_redis.smembers = AsyncMock(return_value={"100", "200", "300"})
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.get_parent_sandbox_info = AsyncMock(return_value={
+                    "mode": "private",
+                    "creator_id": "999"  # Container owner
+                })
+                mock_cm.filter_subscribers_for_private_sandbox = MagicMock(
+                    return_value={"100", "999"}  # Only creator and owner
+                )
+                await action_update_block(message)
+
+        # Should filter subscribers
+        mock_cm.filter_subscribers_for_private_sandbox.assert_called_once()
+        # Should send only to filtered subscribers
+        mock_cm.send_message_to_subscribers.assert_called_once()
+        call_args = mock_cm.send_message_to_subscribers.call_args
+        assert call_args[0][1] == {"100", "999"}
+
+    @pytest.mark.asyncio
+    async def test_action_update_block_no_filter_for_open_sandbox(self, mock_redis):
+        """Test that subscribers are NOT filtered for open sandbox."""
+        message = {
+            "block_uuid": "block-123",
+            "block_data": {
+                "title": "Child Block",
+                "parent_id": "parent-123",
+                "creator_id": 100
+            }
+        }
+        mock_redis.smembers = AsyncMock(return_value={"100", "200", "300"})
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.get_parent_sandbox_info = AsyncMock(return_value={
+                    "mode": "open",  # Open sandbox - no filtering
+                    "creator_id": "999"
+                })
+                await action_update_block(message)
+
+        # Should NOT filter - send to all subscribers
+        mock_cm.send_message_to_subscribers.assert_called_once()
+        call_args = mock_cm.send_message_to_subscribers.call_args
+        assert call_args[0][1] == {"100", "200", "300"}
+
+    @pytest.mark.asyncio
+    async def test_action_update_block_no_filter_without_parent(self, mock_redis):
+        """Test that subscribers are NOT filtered for blocks without parent."""
+        message = {
+            "block_uuid": "root-block",
+            "block_data": {
+                "title": "Root Block"
+                # No parent_id
+            }
+        }
+        mock_redis.smembers = AsyncMock(return_value={"100", "200"})
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.get_parent_sandbox_info = AsyncMock(return_value=None)
+                await action_update_block(message)
+
+        # Should send to all subscribers
+        mock_cm.send_message_to_subscribers.assert_called_once()
+        call_args = mock_cm.send_message_to_subscribers.call_args
+        assert call_args[0][1] == {"100", "200"}
+
+    @pytest.mark.asyncio
+    async def test_action_update_block_no_send_when_no_authorized_subscribers(self, mock_redis):
+        """Test that no message is sent when all subscribers are filtered out."""
+        message = {
+            "block_uuid": "block-123",
+            "block_data": {
+                "title": "Private Block",
+                "parent_id": "parent-123",
+                "creator_id": 100
+            }
+        }
+        mock_redis.smembers = AsyncMock(return_value={"200", "300"})  # No owner, no creator
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.get_parent_sandbox_info = AsyncMock(return_value={
+                    "mode": "private",
+                    "creator_id": "999"
+                })
+                mock_cm.filter_subscribers_for_private_sandbox = MagicMock(
+                    return_value=set()  # No authorized subscribers
+                )
+                await action_update_block(message)
+
+        # Should NOT send any message
+        mock_cm.send_message_to_subscribers.assert_not_called()
+
+
+class TestActionSandboxModeChanged:
+    """Tests for action_sandbox_mode_changed handler."""
+
+    @pytest.fixture
+    def mock_redis(self):
+        """Create a mock Redis client."""
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(return_value=set())
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_action_sandbox_mode_changed_updates_cache(self, mock_redis):
+        """Test that sandbox_mode_changed updates the cache."""
+        message = {
+            "action": "sandbox_mode_changed",
+            "block_uuid": "container-123",
+            "sandbox_mode": "private",
+            "creator_id": 456
+        }
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_sandbox_mode_changed(message)
+
+        mock_cm.update_sandbox_cache.assert_called_once_with(
+            "container-123", "private", 456
+        )
+
+    @pytest.mark.asyncio
+    async def test_action_sandbox_mode_changed_notifies_subscribers(self, mock_redis):
+        """Test that sandbox_mode_changed notifies all subscribers."""
+        message = {
+            "action": "sandbox_mode_changed",
+            "block_uuid": "container-123",
+            "sandbox_mode": "private",
+            "creator_id": 456
+        }
+        mock_redis.smembers = AsyncMock(return_value={"user_1", "user_2"})
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_sandbox_mode_changed(message)
+
+        mock_cm.send_message_to_subscribers.assert_called_once()
+        call_args = mock_cm.send_message_to_subscribers.call_args
+        sent_message = call_args[0][0]
+        subscribers = call_args[0][1]
+
+        assert sent_message["type"] == "sandbox_mode_changed"
+        assert sent_message["block_uuid"] == "container-123"
+        assert sent_message["sandbox_mode"] == "private"
+        assert subscribers == {"user_1", "user_2"}
+
+    @pytest.mark.asyncio
+    async def test_action_sandbox_mode_changed_no_subscribers(self, mock_redis):
+        """Test sandbox_mode_changed with no subscribers."""
+        message = {
+            "action": "sandbox_mode_changed",
+            "block_uuid": "container-123",
+            "sandbox_mode": "none",
+            "creator_id": 456
+        }
+        mock_redis.smembers = AsyncMock(return_value=set())
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                await action_sandbox_mode_changed(message)
+
+        # Cache should still be updated
+        mock_cm.update_sandbox_cache.assert_called_once()
+        # But no message should be sent
+        mock_cm.send_message_to_subscribers.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_action_sandbox_mode_changed_invalid_message(self, mock_redis):
+        """Test sandbox_mode_changed with invalid message."""
+        message = {
+            "action": "sandbox_mode_changed"
+            # Missing required fields
+        }
+
+        with patch("app.rabbitmq_consumer.get_redis_pool", return_value=mock_redis):
+            with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+                mock_cm.update_sandbox_cache = AsyncMock()
+                mock_cm.send_message_to_subscribers = AsyncMock()
+                # Should not raise, just log error
+                await action_sandbox_mode_changed(message)
+
+        mock_cm.update_sandbox_cache.assert_not_called()
+        mock_cm.send_message_to_subscribers.assert_not_called()
+
+
+class TestHandleMessageSandboxModeChanged:
+    """Tests for handle_message with sandbox_mode_changed action."""
+
+    @pytest.fixture
+    def mock_message(self):
+        """Create a mock RabbitMQ message."""
+        message = AsyncMock()
+        message.ack = AsyncMock()
+        message.reject = AsyncMock()
+        return message
+
+    @pytest.mark.asyncio
+    async def test_handle_message_sandbox_mode_changed(self, mock_message):
+        """Test handling sandbox_mode_changed action."""
+        mock_message.body = json.dumps({
+            "action": "sandbox_mode_changed",
+            "block_uuid": "container-123",
+            "sandbox_mode": "private",
+            "creator_id": 456
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_sandbox_mode_changed", new_callable=AsyncMock) as mock_action:
+            await handle_message(mock_message)
+
+        mock_action.assert_called_once()
         mock_message.ack.assert_called_once()

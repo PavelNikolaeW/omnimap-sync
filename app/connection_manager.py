@@ -19,6 +19,9 @@ ANON_USER_ID = str(settings.ANONIM_USER)
 # Redis key prefix for online status
 ONLINE_STATUS_KEY_PREFIX = "user_online:"
 
+# Redis key prefix for sandbox mode cache
+SANDBOX_KEY_PREFIX = "sandbox:"
+
 
 class ConnectionManager:
     """
@@ -310,3 +313,130 @@ class ConnectionManager:
                 logger.debug(f"Refreshed online TTL for user {user_id}")
         except Exception:
             logger.exception(f"Failed to refresh online TTL for user {user_id}")
+
+    # --- Sandbox Mode Caching Methods ---
+
+    async def update_sandbox_cache(
+        self,
+        block_uuid: str,
+        sandbox_mode: str | None,
+        creator_id: str | int | None
+    ) -> None:
+        """
+        Update sandbox mode cache for a block in Redis.
+
+        Stores sandbox info if mode is 'open' or 'private'.
+        Deletes the key if mode is 'none' or not set.
+        """
+        try:
+            redis = await get_redis_pool()
+            key = f"{SANDBOX_KEY_PREFIX}{block_uuid}"
+
+            if sandbox_mode and sandbox_mode in ("open", "private"):
+                await redis.hset(key, mapping={
+                    "mode": sandbox_mode,
+                    "creator_id": str(creator_id) if creator_id else ""
+                })
+                logger.debug(f"Updated sandbox cache for block {block_uuid}: mode={sandbox_mode}")
+            else:
+                await redis.delete(key)
+                logger.debug(f"Deleted sandbox cache for block {block_uuid}")
+        except Exception:
+            logger.exception(f"Failed to update sandbox cache for block {block_uuid}")
+
+    async def get_sandbox_info(self, block_uuid: str) -> dict[str, str] | None:
+        """
+        Get sandbox info for a block from Redis cache.
+
+        Returns dict with 'mode' and 'creator_id' if block is a sandbox container.
+        Returns None if block is not a sandbox or not cached.
+        """
+        if not block_uuid:
+            return None
+
+        try:
+            redis = await get_redis_pool()
+            key = f"{SANDBOX_KEY_PREFIX}{block_uuid}"
+            data = await redis.hgetall(key)
+
+            if data and data.get("mode") in ("open", "private"):
+                return {
+                    "mode": data.get("mode", ""),
+                    "creator_id": data.get("creator_id", "")
+                }
+            return None
+        except Exception:
+            logger.exception(f"Failed to get sandbox info for block {block_uuid}")
+            return None
+
+    async def get_parent_sandbox_info(self, parent_id: str | None) -> dict[str, str] | None:
+        """
+        Get sandbox info for a parent block.
+
+        First checks Redis cache. If not found and backend_url is configured,
+        falls back to HTTP request to backend.
+
+        Returns dict with 'mode' and 'creator_id' if parent is a sandbox container.
+        Returns None if parent is not a sandbox or info not available.
+        """
+        if not parent_id:
+            return None
+
+        # Try Redis cache first
+        cached = await self.get_sandbox_info(parent_id)
+        if cached:
+            return cached
+
+        # Fallback: request from backend if configured
+        if settings.backend_url and settings.service_token:
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.get(
+                        f"{settings.backend_url}/api/v1/blocks/{parent_id}/sandbox/",
+                        headers={"Authorization": f"Bearer {settings.service_token}"}
+                    )
+                    if resp.status_code == 200:
+                        info = resp.json()
+                        mode = info.get("sandbox_mode", "none")
+                        if mode in ("open", "private"):
+                            creator_id = str(info.get("creator_id", ""))
+                            # Cache the result
+                            await self.update_sandbox_cache(parent_id, mode, creator_id)
+                            return {"mode": mode, "creator_id": creator_id}
+            except Exception:
+                logger.exception(f"Failed to fetch sandbox info from backend for {parent_id}")
+
+        return None
+
+    def filter_subscribers_for_private_sandbox(
+        self,
+        subscribers: set[str],
+        block_creator_id: str | int | None,
+        container_owner_id: str | None
+    ) -> set[str]:
+        """
+        Filter subscribers for a block in a private sandbox.
+
+        Only allows:
+        - Block creator (the user who created this specific block)
+        - Container owner (the owner of the sandbox container)
+
+        Args:
+            subscribers: Set of user IDs subscribed to the block
+            block_creator_id: Creator of the block being updated
+            container_owner_id: Owner of the private sandbox container
+
+        Returns:
+            Filtered set of user IDs who should receive the update
+        """
+        block_creator_str = str(block_creator_id) if block_creator_id else ""
+        container_owner_str = str(container_owner_id) if container_owner_id else ""
+
+        filtered = set()
+        for user_id in subscribers:
+            if user_id == block_creator_str or user_id == container_owner_str:
+                filtered.add(user_id)
+
+        return filtered
