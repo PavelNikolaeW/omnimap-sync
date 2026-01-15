@@ -18,9 +18,11 @@ from app.models import (
     UpdateAccessMessage,
     SubscribeMessage,
     UnsubscribeMessage,
+    SandboxModeChangedMessage,
     BlockUpdateResponse,
     BlockUpdatesBatchResponse,
     BlockUpdateAccessResponse,
+    SandboxModeChangedResponse,
     NotificationEventMessage,
     ReminderEventResponse,
     SubscriptionEventResponse,
@@ -39,6 +41,7 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
     Process a single block update.
 
     Saves block data to Redis and notifies all subscribers.
+    Filters recipients for blocks in private sandboxes.
     """
     try:
         msg = UpdateBlockMessage(**message_data)
@@ -56,12 +59,40 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
         logger.exception(f"Failed to save block data for block_uuid={msg.block_uuid}")
         return
 
+    # Update sandbox cache if this block is a sandbox container
+    sandbox_mode = msg.block_data.get("sandbox_mode")
+    if sandbox_mode:
+        creator_id = msg.block_data.get("creator_id")
+        await connection_manager.update_sandbox_cache(msg.block_uuid, sandbox_mode, creator_id)
+
     # Notify subscribed clients
     try:
         subscribers = await redis.smembers(f"block:{msg.block_uuid}")
         if not subscribers:
             logger.debug(f"No subscribers found for block_uuid={msg.block_uuid}")
             return
+
+        # Check if parent is a private sandbox
+        parent_id = msg.block_data.get("parent_id")
+        if parent_id:
+            parent_sandbox = await connection_manager.get_parent_sandbox_info(str(parent_id))
+            if parent_sandbox and parent_sandbox.get("mode") == "private":
+                # Filter subscribers for private sandbox
+                block_creator_id = msg.block_data.get("creator_id")
+                container_owner_id = parent_sandbox.get("creator_id")
+                subscribers = connection_manager.filter_subscribers_for_private_sandbox(
+                    subscribers,
+                    block_creator_id,
+                    container_owner_id
+                )
+                logger.debug(
+                    f"Private sandbox filter: block={msg.block_uuid}, "
+                    f"filtered to {len(subscribers)} subscribers"
+                )
+
+                if not subscribers:
+                    logger.debug(f"No authorized subscribers for private sandbox block {msg.block_uuid}")
+                    return
 
         response = BlockUpdateResponse(
             block_uuid=msg.block_uuid,
@@ -82,6 +113,7 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
 
     Saves all block data to Redis using pipeline and notifies subscribers.
     Groups notifications by user to reduce N+1 send operations.
+    Filters recipients for blocks in private sandboxes.
     """
     try:
         msg = UpdateBlocksMessage(**message_data)
@@ -105,6 +137,14 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
         logger.exception("Failed to save block data for batch update")
         return
 
+    # Step 1.5: Update sandbox cache for blocks that are sandbox containers
+    for block_uuid, block_data in msg.blocks.items():
+        if isinstance(block_data, dict):
+            sandbox_mode = block_data.get("sandbox_mode")
+            if sandbox_mode:
+                creator_id = block_data.get("creator_id")
+                await connection_manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
+
     # Step 2: Collect subscribers and batch notifications by user
     try:
         subscribers_by_block: dict[str, set[str]] = {}
@@ -119,6 +159,29 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
                 if subs:
                     subscribers_by_block[block_uuid] = subs
 
+        # Collect unique parent IDs and prefetch their sandbox info
+        parent_ids: set[str] = set()
+        for block_data in msg.blocks.values():
+            if isinstance(block_data, dict):
+                parent_id = block_data.get("parent_id")
+                if parent_id:
+                    parent_ids.add(str(parent_id))
+
+        # Cache parent sandbox info - fetch in parallel to avoid N+1 lookups
+        parent_sandbox_cache: dict[str, dict[str, str] | None] = {}
+        if parent_ids:
+            async def fetch_parent_sandbox(pid: str) -> tuple[str, dict[str, str] | None]:
+                return pid, await connection_manager.get_parent_sandbox_info(pid)
+
+            results = await asyncio.gather(
+                *[fetch_parent_sandbox(pid) for pid in parent_ids],
+                return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, tuple):
+                    pid, sandbox_info = result
+                    parent_sandbox_cache[pid] = sandbox_info
+
         # Group updates by user to reduce number of send operations
         user_updates: dict[str, list[dict[str, Any]]] = {}
         for block_uuid, block_data in msg.blocks.items():
@@ -126,6 +189,23 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
             if not subs:
                 logger.debug(f"No subscribers for block_uuid={block_uuid}")
                 continue
+
+            # Filter subscribers for private sandbox
+            if isinstance(block_data, dict):
+                parent_id = block_data.get("parent_id")
+                if parent_id:
+                    parent_sandbox = parent_sandbox_cache.get(str(parent_id))
+                    if parent_sandbox and parent_sandbox.get("mode") == "private":
+                        block_creator_id = block_data.get("creator_id")
+                        container_owner_id = parent_sandbox.get("creator_id")
+                        subs = connection_manager.filter_subscribers_for_private_sandbox(
+                            subs,
+                            block_creator_id,
+                            container_owner_id
+                        )
+                        if not subs:
+                            logger.debug(f"No authorized subscribers for private sandbox block {block_uuid}")
+                            continue
 
             update_msg = BlockUpdateResponse(
                 block_uuid=block_uuid,
@@ -329,15 +409,60 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
             for user_id, blocks in user_blocks.items():
                 pipe.srem(f"subscriber:{user_id}:blocks", *blocks)
 
-            # Delete block and blockdata keys
+            # Delete block, blockdata, and sandbox cache keys
             pipe.delete(*[f"block:{uuid}" for uuid in chunk])
             pipe.delete(*[f"blockdata:{uuid}" for uuid in chunk])
+            pipe.delete(*[f"sandbox:{uuid}" for uuid in chunk])
 
             await pipe.execute()
 
         logger.info(f"Successfully unsubscribed and cleaned up {len(msg.block_uuids)} blocks")
     except Exception:
         logger.exception("Failed to process unsubscribe action")
+
+
+async def action_sandbox_mode_changed(message_data: dict[str, Any]) -> None:
+    """
+    Process sandbox mode change notification.
+
+    Updates the sandbox cache and notifies all subscribers about the mode change.
+    This allows clients to react to sandbox mode transitions (none -> private, etc).
+    """
+    try:
+        msg = SandboxModeChangedMessage(**message_data)
+    except ValidationError as e:
+        logger.error(f"Invalid sandbox_mode_changed message: {e}")
+        return
+
+    # Update sandbox cache
+    await connection_manager.update_sandbox_cache(
+        msg.block_uuid,
+        msg.sandbox_mode,
+        msg.creator_id
+    )
+
+    # Notify all subscribers about the mode change
+    redis = await get_redis_pool()
+    try:
+        subscribers = await redis.smembers(f"block:{msg.block_uuid}")
+        if not subscribers:
+            logger.debug(f"No subscribers for sandbox_mode_changed block {msg.block_uuid}")
+            return
+
+        response = SandboxModeChangedResponse(
+            block_uuid=msg.block_uuid,
+            sandbox_mode=msg.sandbox_mode
+        )
+        await connection_manager.send_message_to_subscribers(
+            response.model_dump(),
+            subscribers
+        )
+        logger.info(
+            f"Processed sandbox_mode_changed for block {msg.block_uuid}: "
+            f"mode={msg.sandbox_mode}, notified {len(subscribers)} subscribers"
+        )
+    except Exception:
+        logger.exception(f"Failed to notify subscribers for sandbox_mode_changed block {msg.block_uuid}")
 
 
 # =============================================================================
@@ -544,6 +669,8 @@ async def handle_message(message: IncomingMessage) -> None:
             await action_subscribe(message_data)
         elif action == 'unsubscribe':
             await action_unsubscribe(message_data)
+        elif action == 'sandbox_mode_changed':
+            await action_sandbox_mode_changed(message_data)
         # Handle chat events from backend
         elif action == 'chat_event':
             await action_chat_event(message_data)

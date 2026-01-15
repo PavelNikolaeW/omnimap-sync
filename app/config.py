@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     jwt_algorithms: str = "HS256"
     jwt_secret_key: str = ""  # Required in production, validated below
 
+    # Backend service settings (for fallback sandbox info requests)
+    backend_url: str = ""  # e.g., "http://localhost:8000" - empty disables fallback
+    service_token: str = ""  # Service-to-service auth token
+
     # Performance tuning
     block_portion: int = 500  # Chunk size for Redis pipeline operations
     MAX_CONCURRENT_SENDS: int = 10  # Semaphore limit for anonymous user
