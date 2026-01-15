@@ -554,41 +554,59 @@ class TestSandboxCaching(TestConnectionManager):
 
     @pytest.mark.asyncio
     async def test_update_sandbox_cache_private_mode(self, manager):
-        """Test that private sandbox is cached in Redis."""
+        """Test that private sandbox is cached in Redis with TTL."""
         block_uuid = "block-123"
         sandbox_mode = "private"
         creator_id = 456
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
-            mock_redis.hset = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.hset = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
             mock_get_redis.return_value = mock_redis
 
             await manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
 
-            mock_redis.hset.assert_called_once_with(
+            mock_redis.pipeline.assert_called_once_with(transaction=True)
+            mock_pipe.hset.assert_called_once_with(
                 "sandbox:block-123",
                 mapping={"mode": "private", "creator_id": "456"}
             )
+            mock_pipe.expire.assert_called_once()
+            mock_pipe.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_sandbox_cache_open_mode(self, manager):
-        """Test that open sandbox is cached in Redis."""
+        """Test that open sandbox is cached in Redis with TTL."""
         block_uuid = "block-123"
         sandbox_mode = "open"
         creator_id = "789"
 
         with patch('app.connection_manager.get_redis_pool') as mock_get_redis:
             mock_redis = AsyncMock()
-            mock_redis.hset = AsyncMock()
+            mock_pipe = MagicMock()
+            mock_pipe.hset = MagicMock()
+            mock_pipe.expire = MagicMock()
+            mock_pipe.execute = AsyncMock()
+            mock_pipe.__aenter__ = AsyncMock(return_value=mock_pipe)
+            mock_pipe.__aexit__ = AsyncMock(return_value=None)
+            mock_redis.pipeline = MagicMock(return_value=mock_pipe)
             mock_get_redis.return_value = mock_redis
 
             await manager.update_sandbox_cache(block_uuid, sandbox_mode, creator_id)
 
-            mock_redis.hset.assert_called_once_with(
+            mock_redis.pipeline.assert_called_once_with(transaction=True)
+            mock_pipe.hset.assert_called_once_with(
                 "sandbox:block-123",
                 mapping={"mode": "open", "creator_id": "789"}
             )
+            mock_pipe.expire.assert_called_once()
+            mock_pipe.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_update_sandbox_cache_none_mode_deletes(self, manager):

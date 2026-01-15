@@ -167,10 +167,20 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
                 if parent_id:
                     parent_ids.add(str(parent_id))
 
-        # Cache parent sandbox info to avoid N+1 lookups
+        # Cache parent sandbox info - fetch in parallel to avoid N+1 lookups
         parent_sandbox_cache: dict[str, dict[str, str] | None] = {}
-        for parent_id in parent_ids:
-            parent_sandbox_cache[parent_id] = await connection_manager.get_parent_sandbox_info(parent_id)
+        if parent_ids:
+            async def fetch_parent_sandbox(pid: str) -> tuple[str, dict[str, str] | None]:
+                return pid, await connection_manager.get_parent_sandbox_info(pid)
+
+            results = await asyncio.gather(
+                *[fetch_parent_sandbox(pid) for pid in parent_ids],
+                return_exceptions=True
+            )
+            for result in results:
+                if isinstance(result, tuple):
+                    pid, sandbox_info = result
+                    parent_sandbox_cache[pid] = sandbox_info
 
         # Group updates by user to reduce number of send operations
         user_updates: dict[str, list[dict[str, Any]]] = {}
@@ -399,9 +409,10 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
             for user_id, blocks in user_blocks.items():
                 pipe.srem(f"subscriber:{user_id}:blocks", *blocks)
 
-            # Delete block and blockdata keys
+            # Delete block, blockdata, and sandbox cache keys
             pipe.delete(*[f"block:{uuid}" for uuid in chunk])
             pipe.delete(*[f"blockdata:{uuid}" for uuid in chunk])
+            pipe.delete(*[f"sandbox:{uuid}" for uuid in chunk])
 
             await pipe.execute()
 

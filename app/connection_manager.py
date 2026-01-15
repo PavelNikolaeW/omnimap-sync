@@ -11,6 +11,13 @@ from starlette.websockets import WebSocket
 from app.config import settings
 from app.redis_client import get_redis_pool
 
+# Optional httpx for backend fallback requests
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
 logger = logging.getLogger("realtime_service")
 
 # Anonymous user ID as string (user_id in ConnectionManager is always str)
@@ -21,6 +28,9 @@ ONLINE_STATUS_KEY_PREFIX = "user_online:"
 
 # Redis key prefix for sandbox mode cache
 SANDBOX_KEY_PREFIX = "sandbox:"
+
+# TTL for sandbox cache keys (24 hours) - safety mechanism for stale entries
+SANDBOX_CACHE_TTL = 86400
 
 
 class ConnectionManager:
@@ -325,7 +335,7 @@ class ConnectionManager:
         """
         Update sandbox mode cache for a block in Redis.
 
-        Stores sandbox info if mode is 'open' or 'private'.
+        Stores sandbox info if mode is 'open' or 'private' with TTL.
         Deletes the key if mode is 'none' or not set.
         """
         try:
@@ -333,10 +343,13 @@ class ConnectionManager:
             key = f"{SANDBOX_KEY_PREFIX}{block_uuid}"
 
             if sandbox_mode and sandbox_mode in ("open", "private"):
-                await redis.hset(key, mapping={
-                    "mode": sandbox_mode,
-                    "creator_id": str(creator_id) if creator_id else ""
-                })
+                async with redis.pipeline(transaction=True) as pipe:
+                    pipe.hset(key, mapping={
+                        "mode": sandbox_mode,
+                        "creator_id": str(creator_id) if creator_id else ""
+                    })
+                    pipe.expire(key, SANDBOX_CACHE_TTL)
+                    await pipe.execute()
                 logger.debug(f"Updated sandbox cache for block {block_uuid}: mode={sandbox_mode}")
             else:
                 await redis.delete(key)
@@ -387,11 +400,9 @@ class ConnectionManager:
         if cached:
             return cached
 
-        # Fallback: request from backend if configured
-        if settings.backend_url and settings.service_token:
+        # Fallback: request from backend if configured and httpx is available
+        if HTTPX_AVAILABLE and settings.backend_url and settings.service_token:
             try:
-                import httpx
-
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     resp = await client.get(
                         f"{settings.backend_url}/api/v1/blocks/{parent_id}/sandbox/",
