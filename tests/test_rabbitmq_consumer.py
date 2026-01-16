@@ -1503,23 +1503,6 @@ class TestActionAccessRequest:
         mock_cm.send_to_user.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unknown_type_logs_warning(self):
-        """Test handling of unknown access_request type."""
-        message = {
-            "action": "access_request",
-            "type": "unknown_type",
-            "request_id": "req-123"
-        }
-
-        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
-            mock_cm.send_to_user = AsyncMock(return_value=True)
-            from app.rabbitmq_consumer import action_access_request
-            # Should not raise, just log warning
-            await action_access_request(message)
-
-        mock_cm.send_to_user.assert_not_called()
-
-    @pytest.mark.asyncio
     async def test_invalid_message_format(self):
         """Test handling of invalid message format."""
         message = {
@@ -1574,6 +1557,28 @@ class TestActionAccessRequest:
         mock_cm.send_to_user.assert_called_once()
         call_args = mock_cm.send_to_user.call_args
         assert call_args[0][0] == "456"
+
+    @pytest.mark.asyncio
+    async def test_user_id_as_string_in_response(self):
+        """Test that user_id as string is handled correctly in response."""
+        message = {
+            "action": "access_request",
+            "type": "response",
+            "request_id": "req-123",
+            "approved": True,
+            "permission": "view",
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "user_id": "789"  # String instead of int
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+        call_args = mock_cm.send_to_user.call_args
+        assert call_args[0][0] == "789"
 
 
 class TestHandleMessageAccessRequest:

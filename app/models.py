@@ -221,5 +221,5 @@ class AccessRequestResponse(BaseModel):
     Proxied directly from backend with type: 'access_request'.
     """
     type: Literal["access_request"] = "access_request"
-    request_type: str  # new_request or response
+    request_type: Literal["new_request", "response"]
     data: dict[str, Any]

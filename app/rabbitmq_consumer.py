@@ -711,9 +711,6 @@ async def action_access_request(message_data: dict[str, Any]) -> None:
         else:
             logger.debug(f"Access request response not delivered, user {target_user_id} offline")
 
-    else:
-        logger.warning(f"Unknown access_request type: {request_type}")
-
 
 async def handle_message(message: IncomingMessage) -> None:
     """
