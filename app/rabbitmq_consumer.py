@@ -28,6 +28,8 @@ from app.models import (
     SubscriptionEventResponse,
     ChatEventMessage,
     ChatEventResponse,
+    AccessRequestMessage,
+    AccessRequestResponse,
 )
 from app.redis_client import get_redis_pool
 from app.utils import prepare_block_data_for_redis, parse_redis_block_data
@@ -640,6 +642,76 @@ async def action_notification_event(message_data: dict[str, Any]) -> None:
     logger.info(f"Sent {event_type} event to user {user_id}")
 
 
+# =============================================================================
+# Access Request Event Handler (from backend with action: 'access_request')
+# =============================================================================
+
+async def action_access_request(message_data: dict[str, Any]) -> None:
+    """
+    Process access request events from backend (action: 'access_request').
+
+    Handles two event types:
+    - new_request: New access request created, notify block owner
+    - response: Access request approved/denied, notify requester
+    """
+    try:
+        msg = AccessRequestMessage(**message_data)
+    except ValidationError as e:
+        logger.error(f"Invalid access_request message: {e}")
+        return
+
+    request_type = msg.type
+
+    if request_type == "new_request":
+        # Send to block owner
+        if not msg.owner_id:
+            logger.error("new_request access_request missing owner_id")
+            return
+
+        target_user_id = str(msg.owner_id)
+
+        response = AccessRequestResponse(
+            request_type="new_request",
+            data={
+                "request_id": msg.request_id,
+                "requester": msg.requester,
+                "block": msg.block,
+                "owner_id": msg.owner_id
+            }
+        )
+
+        delivered = await connection_manager.send_to_user(target_user_id, response.model_dump())
+        if delivered:
+            logger.info(f"Access request new_request delivered to owner {target_user_id}")
+        else:
+            logger.debug(f"Access request new_request not delivered, owner {target_user_id} offline")
+
+    elif request_type == "response":
+        # Send to requester
+        if not msg.user_id:
+            logger.error("response access_request missing user_id")
+            return
+
+        target_user_id = str(msg.user_id)
+
+        response = AccessRequestResponse(
+            request_type="response",
+            data={
+                "request_id": msg.request_id,
+                "approved": msg.approved,
+                "permission": msg.permission,
+                "block": msg.block,
+                "user_id": msg.user_id
+            }
+        )
+
+        delivered = await connection_manager.send_to_user(target_user_id, response.model_dump())
+        if delivered:
+            logger.info(f"Access request response delivered to user {target_user_id}")
+        else:
+            logger.debug(f"Access request response not delivered, user {target_user_id} offline")
+
+
 async def handle_message(message: IncomingMessage) -> None:
     """
     Process incoming RabbitMQ messages.
@@ -674,6 +746,9 @@ async def handle_message(message: IncomingMessage) -> None:
         # Handle chat events from backend
         elif action == 'chat_event':
             await action_chat_event(message_data)
+        # Handle access request events from backend
+        elif action == 'access_request':
+            await action_access_request(message_data)
         # Handle type-based messages (notification events)
         elif event_type in NOTIFICATION_EVENT_TYPES:
             await action_notification_event(message_data)
