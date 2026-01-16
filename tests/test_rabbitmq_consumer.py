@@ -14,6 +14,7 @@ from app.rabbitmq_consumer import (
     action_unsubscribe,
     action_sandbox_mode_changed,
     action_notification_event,
+    action_access_request,
     handle_message,
     send_message_update_access,
     REMINDER_EVENT_TYPES,
@@ -1369,6 +1370,255 @@ class TestHandleMessageSandboxModeChanged:
         }).encode()
 
         with patch("app.rabbitmq_consumer.action_sandbox_mode_changed", new_callable=AsyncMock) as mock_action:
+            await handle_message(mock_message)
+
+        mock_action.assert_called_once()
+        mock_message.ack.assert_called_once()
+
+
+class TestActionAccessRequest:
+    """Tests for action_access_request function."""
+
+    @pytest.mark.asyncio
+    async def test_new_request_sends_to_owner(self):
+        """Test that new_request is sent to the block owner."""
+        message = {
+            "action": "access_request",
+            "type": "new_request",
+            "request_id": "req-123",
+            "requester": {"id": 123, "username": "john_doe"},
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "owner_id": 456
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+        call_args = mock_cm.send_to_user.call_args
+        target_user_id = call_args[0][0]
+        sent_message = call_args[0][1]
+
+        assert target_user_id == "456"
+        assert sent_message["type"] == "access_request"
+        assert sent_message["request_type"] == "new_request"
+        assert sent_message["data"]["request_id"] == "req-123"
+        assert sent_message["data"]["requester"]["username"] == "john_doe"
+        assert sent_message["data"]["block"]["title"] == "Block Title"
+
+    @pytest.mark.asyncio
+    async def test_response_sends_to_requester(self):
+        """Test that response is sent to the requester."""
+        message = {
+            "action": "access_request",
+            "type": "response",
+            "request_id": "req-123",
+            "approved": True,
+            "permission": "view",
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "user_id": 123
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+        call_args = mock_cm.send_to_user.call_args
+        target_user_id = call_args[0][0]
+        sent_message = call_args[0][1]
+
+        assert target_user_id == "123"
+        assert sent_message["type"] == "access_request"
+        assert sent_message["request_type"] == "response"
+        assert sent_message["data"]["approved"] is True
+        assert sent_message["data"]["permission"] == "view"
+
+    @pytest.mark.asyncio
+    async def test_response_denied_sends_to_requester(self):
+        """Test that denied response is sent to the requester."""
+        message = {
+            "action": "access_request",
+            "type": "response",
+            "request_id": "req-456",
+            "approved": False,
+            "permission": None,
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "user_id": 789
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+        call_args = mock_cm.send_to_user.call_args
+        target_user_id = call_args[0][0]
+        sent_message = call_args[0][1]
+
+        assert target_user_id == "789"
+        assert sent_message["data"]["approved"] is False
+
+    @pytest.mark.asyncio
+    async def test_new_request_missing_owner_id(self):
+        """Test handling of new_request missing owner_id."""
+        message = {
+            "action": "access_request",
+            "type": "new_request",
+            "request_id": "req-123",
+            "requester": {"id": 123, "username": "john_doe"},
+            "block": {"id": "block-uuid", "title": "Block Title"}
+            # Missing owner_id
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_response_missing_user_id(self):
+        """Test handling of response missing user_id."""
+        message = {
+            "action": "access_request",
+            "type": "response",
+            "request_id": "req-123",
+            "approved": True,
+            "permission": "view",
+            "block": {"id": "block-uuid", "title": "Block Title"}
+            # Missing user_id
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unknown_type_logs_warning(self):
+        """Test handling of unknown access_request type."""
+        message = {
+            "action": "access_request",
+            "type": "unknown_type",
+            "request_id": "req-123"
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            # Should not raise, just log warning
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invalid_message_format(self):
+        """Test handling of invalid message format."""
+        message = {
+            "action": "access_request"
+            # Missing required 'type' field
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            # Should not raise, just log error
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_user_offline_returns_false(self):
+        """Test that offline user returns False from send_to_user."""
+        message = {
+            "action": "access_request",
+            "type": "new_request",
+            "request_id": "req-123",
+            "requester": {"id": 123, "username": "john_doe"},
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "owner_id": 456
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=False)  # User offline
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_owner_id_as_string(self):
+        """Test that owner_id as string is handled correctly."""
+        message = {
+            "action": "access_request",
+            "type": "new_request",
+            "request_id": "req-123",
+            "requester": {"id": 123, "username": "john_doe"},
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "owner_id": "456"  # String instead of int
+        }
+
+        with patch("app.rabbitmq_consumer.connection_manager") as mock_cm:
+            mock_cm.send_to_user = AsyncMock(return_value=True)
+            from app.rabbitmq_consumer import action_access_request
+            await action_access_request(message)
+
+        mock_cm.send_to_user.assert_called_once()
+        call_args = mock_cm.send_to_user.call_args
+        assert call_args[0][0] == "456"
+
+
+class TestHandleMessageAccessRequest:
+    """Tests for handle_message with access_request action."""
+
+    @pytest.fixture
+    def mock_message(self):
+        """Create a mock RabbitMQ message."""
+        message = AsyncMock()
+        message.ack = AsyncMock()
+        message.reject = AsyncMock()
+        return message
+
+    @pytest.mark.asyncio
+    async def test_handle_message_access_request_new(self, mock_message):
+        """Test handling access_request new_request via handle_message."""
+        mock_message.body = json.dumps({
+            "action": "access_request",
+            "type": "new_request",
+            "request_id": "req-123",
+            "requester": {"id": 123, "username": "john_doe"},
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "owner_id": 456
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_access_request", new_callable=AsyncMock) as mock_action:
+            await handle_message(mock_message)
+
+        mock_action.assert_called_once()
+        mock_message.ack.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_access_request_response(self, mock_message):
+        """Test handling access_request response via handle_message."""
+        mock_message.body = json.dumps({
+            "action": "access_request",
+            "type": "response",
+            "request_id": "req-123",
+            "approved": True,
+            "permission": "view",
+            "block": {"id": "block-uuid", "title": "Block Title"},
+            "user_id": 123
+        }).encode()
+
+        with patch("app.rabbitmq_consumer.action_access_request", new_callable=AsyncMock) as mock_action:
             await handle_message(mock_message)
 
         mock_action.assert_called_once()

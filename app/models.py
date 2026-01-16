@@ -188,3 +188,38 @@ class SandboxModeChangedResponse(BaseModel):
     type: Literal["sandbox_mode_changed"] = "sandbox_mode_changed"
     block_uuid: str
     sandbox_mode: str
+
+
+# =============================================================================
+# Access Request Models (permission requests from users)
+# =============================================================================
+
+class AccessRequestMessage(BaseModel):
+    """
+    Access request event from RabbitMQ (action: 'access_request').
+
+    Used by backend to notify about access requests:
+    - new_request: sent to block owner when someone requests access
+    - response: sent to requester when owner approves/denies
+    """
+    type: Literal["new_request", "response"]
+    request_id: str
+    # For new_request
+    requester: dict[str, Any] | None = None  # {id: int, username: str}
+    block: dict[str, Any] | None = None  # {id: str, title: str}
+    owner_id: int | str | None = None
+    # For response
+    approved: bool | None = None
+    permission: str | None = None
+    user_id: int | str | None = None
+
+
+class AccessRequestResponse(BaseModel):
+    """
+    Access request event sent to client via WebSocket.
+
+    Proxied directly from backend with type: 'access_request'.
+    """
+    type: Literal["access_request"] = "access_request"
+    request_type: str  # new_request or response
+    data: dict[str, Any]
