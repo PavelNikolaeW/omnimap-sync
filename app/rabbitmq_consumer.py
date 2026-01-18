@@ -671,13 +671,11 @@ async def action_access_request(message_data: dict[str, Any]) -> None:
         target_user_id = str(msg.owner_id)
 
         response = AccessRequestResponse(
-            request_type="new_request",
-            data={
-                "request_id": msg.request_id,
-                "requester": msg.requester,
-                "block": msg.block,
-                "owner_id": msg.owner_id
-            }
+            type="new_request",
+            request_id=msg.request_id,
+            requester=msg.requester,
+            block=msg.block,
+            owner_id=msg.owner_id
         )
 
         delivered = await connection_manager.send_to_user(target_user_id, response.model_dump())
@@ -695,14 +693,12 @@ async def action_access_request(message_data: dict[str, Any]) -> None:
         target_user_id = str(msg.user_id)
 
         response = AccessRequestResponse(
-            request_type="response",
-            data={
-                "request_id": msg.request_id,
-                "approved": msg.approved,
-                "permission": msg.permission,
-                "block": msg.block,
-                "user_id": msg.user_id
-            }
+            type="response",
+            request_id=msg.request_id,
+            approved=msg.approved,
+            permission=msg.permission,
+            block=msg.block,
+            user_id=msg.user_id
         )
 
         delivered = await connection_manager.send_to_user(target_user_id, response.model_dump())

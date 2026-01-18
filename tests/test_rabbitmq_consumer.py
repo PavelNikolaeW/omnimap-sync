@@ -1402,11 +1402,11 @@ class TestActionAccessRequest:
         sent_message = call_args[0][1]
 
         assert target_user_id == "456"
-        assert sent_message["type"] == "access_request"
-        assert sent_message["request_type"] == "new_request"
-        assert sent_message["data"]["request_id"] == "req-123"
-        assert sent_message["data"]["requester"]["username"] == "john_doe"
-        assert sent_message["data"]["block"]["title"] == "Block Title"
+        assert sent_message["action"] == "access_request"
+        assert sent_message["type"] == "new_request"
+        assert sent_message["request_id"] == "req-123"
+        assert sent_message["requester"]["username"] == "john_doe"
+        assert sent_message["block"]["title"] == "Block Title"
 
     @pytest.mark.asyncio
     async def test_response_sends_to_requester(self):
@@ -1432,10 +1432,10 @@ class TestActionAccessRequest:
         sent_message = call_args[0][1]
 
         assert target_user_id == "123"
-        assert sent_message["type"] == "access_request"
-        assert sent_message["request_type"] == "response"
-        assert sent_message["data"]["approved"] is True
-        assert sent_message["data"]["permission"] == "view"
+        assert sent_message["action"] == "access_request"
+        assert sent_message["type"] == "response"
+        assert sent_message["approved"] is True
+        assert sent_message["permission"] == "view"
 
     @pytest.mark.asyncio
     async def test_response_denied_sends_to_requester(self):
@@ -1461,7 +1461,7 @@ class TestActionAccessRequest:
         sent_message = call_args[0][1]
 
         assert target_user_id == "789"
-        assert sent_message["data"]["approved"] is False
+        assert sent_message["approved"] is False
 
     @pytest.mark.asyncio
     async def test_new_request_missing_owner_id(self):

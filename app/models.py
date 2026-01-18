@@ -218,8 +218,19 @@ class AccessRequestResponse(BaseModel):
     """
     Access request event sent to client via WebSocket.
 
-    Proxied directly from backend with type: 'access_request'.
+    Format matches backend RabbitMQ message:
+    - action: 'access_request'
+    - type: 'new_request' | 'response'
+    - All fields at top level (no nested 'data' object)
     """
-    type: Literal["access_request"] = "access_request"
-    request_type: Literal["new_request", "response"]
-    data: dict[str, Any]
+    action: Literal["access_request"] = "access_request"
+    type: Literal["new_request", "response"]
+    request_id: str
+    # For new_request
+    requester: dict[str, Any] | None = None  # {id: int, username: str}
+    block: dict[str, Any] | None = None  # {id: str, title: str}
+    owner_id: int | str | None = None
+    # For response
+    approved: bool | None = None
+    permission: str | None = None
+    user_id: int | str | None = None
