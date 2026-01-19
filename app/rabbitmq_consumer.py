@@ -44,6 +44,9 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
 
     Saves block data to Redis and notifies all subscribers.
     Filters recipients for blocks in private sandboxes.
+
+    Uses sandbox_context from message if provided (preferred),
+    falls back to Redis lookup for backwards compatibility.
     """
     try:
         msg = UpdateBlockMessage(**message_data)
@@ -77,7 +80,17 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
         # Check if parent is a private sandbox
         parent_id = msg.block_data.get("parent_id")
         if parent_id:
-            parent_sandbox = await connection_manager.get_parent_sandbox_info(str(parent_id))
+            parent_id_str = str(parent_id)
+            parent_sandbox: dict[str, Any] | None = None
+
+            # Use sandbox_context from message if provided (no Redis lookup needed)
+            if msg.sandbox_context and parent_id_str in msg.sandbox_context:
+                ctx = msg.sandbox_context[parent_id_str]
+                parent_sandbox = {"mode": ctx.mode, "creator_id": str(ctx.creator_id) if ctx.creator_id else ""}
+            else:
+                # Fallback: lookup in Redis (backwards compatibility)
+                parent_sandbox = await connection_manager.get_parent_sandbox_info(parent_id_str)
+
             if parent_sandbox and parent_sandbox.get("mode") == "private":
                 # Filter subscribers for private sandbox
                 block_creator_id = msg.block_data.get("creator_id")
@@ -116,6 +129,9 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
     Saves all block data to Redis using pipeline and notifies subscribers.
     Groups notifications by user to reduce N+1 send operations.
     Filters recipients for blocks in private sandboxes.
+
+    Uses sandbox_context from message if provided (preferred),
+    falls back to Redis lookup for backwards compatibility.
     """
     try:
         msg = UpdateBlocksMessage(**message_data)
@@ -161,28 +177,40 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
                 if subs:
                     subscribers_by_block[block_uuid] = subs
 
-        # Collect unique parent IDs and prefetch their sandbox info
-        parent_ids: set[str] = set()
-        for block_data in msg.blocks.values():
-            if isinstance(block_data, dict):
-                parent_id = block_data.get("parent_id")
-                if parent_id:
-                    parent_ids.add(str(parent_id))
-
-        # Cache parent sandbox info - fetch in parallel to avoid N+1 lookups
+        # Build parent sandbox cache from message context or Redis fallback
         parent_sandbox_cache: dict[str, dict[str, str] | None] = {}
-        if parent_ids:
-            async def fetch_parent_sandbox(pid: str) -> tuple[str, dict[str, str] | None]:
-                return pid, await connection_manager.get_parent_sandbox_info(pid)
 
-            results = await asyncio.gather(
-                *[fetch_parent_sandbox(pid) for pid in parent_ids],
-                return_exceptions=True
-            )
-            for result in results:
-                if isinstance(result, tuple):
-                    pid, sandbox_info = result
-                    parent_sandbox_cache[pid] = sandbox_info
+        if msg.sandbox_context:
+            # Use sandbox_context from message (preferred - no Redis lookups)
+            for parent_id, ctx in msg.sandbox_context.items():
+                parent_sandbox_cache[parent_id] = {
+                    "mode": ctx.mode,
+                    "creator_id": str(ctx.creator_id) if ctx.creator_id else ""
+                }
+            logger.debug(f"Using sandbox_context from message: {len(parent_sandbox_cache)} parents")
+        else:
+            # Fallback: collect parent IDs and fetch from Redis (backwards compatibility)
+            parent_ids: set[str] = set()
+            for block_data in msg.blocks.values():
+                if isinstance(block_data, dict):
+                    parent_id = block_data.get("parent_id")
+                    if parent_id:
+                        parent_ids.add(str(parent_id))
+
+            # Fetch sandbox info using pipeline to avoid connection exhaustion
+            if parent_ids:
+                parent_ids_list = list(parent_ids)
+                pipe = redis.pipeline(transaction=True)
+                for pid in parent_ids_list:
+                    pipe.hgetall(f"sandbox:{pid}")
+                results = await pipe.execute()
+
+                for pid, data in zip(parent_ids_list, results):
+                    if data and data.get("mode") in ("open", "private"):
+                        parent_sandbox_cache[pid] = {
+                            "mode": data.get("mode", ""),
+                            "creator_id": data.get("creator_id", "")
+                        }
 
         # Group updates by user to reduce number of send operations
         user_updates: dict[str, list[dict[str, Any]]] = {}

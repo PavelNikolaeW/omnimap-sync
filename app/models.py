@@ -9,15 +9,27 @@ from pydantic import BaseModel, Field
 # RabbitMQ Message Models (incoming from queue)
 # =============================================================================
 
+class SandboxContextItem(BaseModel):
+    """Sandbox info for a parent block."""
+    mode: Literal["open", "private"]
+    creator_id: int | str | None = None
+
+
 class UpdateBlockMessage(BaseModel):
     """Message for updating a single block."""
     block_uuid: str
     block_data: dict[str, Any]
+    # Sandbox context from backend - avoids Redis lookups
+    # Format: {parent_uuid: {mode: "private", creator_id: 123}}
+    sandbox_context: dict[str, SandboxContextItem] | None = None
 
 
 class UpdateBlocksMessage(BaseModel):
     """Message for batch updating multiple blocks."""
     blocks: dict[str, dict[str, Any]]  # {uuid: block_data}
+    # Sandbox context from backend - avoids Redis lookups
+    # Format: {parent_uuid: {mode: "private", creator_id: 123}}
+    sandbox_context: dict[str, SandboxContextItem] | None = None
 
 
 class UpdateAccessMessage(BaseModel):
