@@ -9,6 +9,14 @@ from typing import Any
 from starlette.websockets import WebSocket
 
 from app.config import settings
+from app.metrics import (
+    ws_connections_active,
+    ws_connections_total,
+    ws_disconnections_total,
+    ws_users_active,
+    ws_messages_sent_total,
+    ws_send_errors_total,
+)
 from app.redis_client import get_redis_pool
 
 # Optional httpx for backend fallback requests
@@ -79,6 +87,11 @@ class ConnectionManager:
             f"Total connections: {len(self.active_connections[user_id])}"
         )
 
+        # Prometheus metrics
+        ws_connections_active.inc()
+        ws_connections_total.inc()
+        ws_users_active.set(len(self.active_connections))
+
         # Track online status in Redis (skip anonymous users)
         if user_id != ANON_USER_ID:
             await self._increment_online_counter(user_id)
@@ -111,6 +124,11 @@ class ConnectionManager:
                 del self.active_connections[user_id]
                 should_cleanup = True
 
+        # Prometheus metrics
+        ws_connections_active.dec()
+        ws_disconnections_total.inc()
+        ws_users_active.set(len(self.active_connections))
+
         # Decrement online counter in Redis (skip anonymous users)
         if user_id != ANON_USER_ID:
             await self._decrement_online_counter(user_id)
@@ -136,8 +154,10 @@ class ConnectionManager:
         """
         try:
             await websocket.send_json(message)
+            ws_messages_sent_total.inc()
             logger.debug(f"Sent message to user {user_id}; message details: {message.get('type')}")
         except Exception as e:
+            ws_send_errors_total.inc()
             logger.exception(f"Error sending message to user {user_id}: {e}")
             await self.disconnect(user_id, websocket)
 

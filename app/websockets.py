@@ -10,12 +10,16 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.connection_manager import ConnectionManager
 from app.config import settings
+from app.metrics import ws_messages_received_total
 from app.models import ErrorResponse, BlockUpdatesResponse
 from app.redis_client import get_redis_pool
 from app.utils import parse_redis_block_data
 from app.auth import verify_jwt
 
 logger = logging.getLogger("realtime_service")
+
+# Known client actions for metric label sanitization (prevents cardinality explosion)
+_KNOWN_WS_ACTIONS = {"ping", "get_updates"}
 
 connection_manager = ConnectionManager()
 
@@ -103,6 +107,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
             action = data.get("action")
             blocks = data.get("blocks", [])
+            ws_messages_received_total.labels(
+                action=action if action in _KNOWN_WS_ACTIONS else "unknown"
+            ).inc()
 
             if action == "ping":
                 await websocket.send_json({"type": "pong"})

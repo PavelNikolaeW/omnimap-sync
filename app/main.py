@@ -7,7 +7,8 @@ from typing import Optional
 
 from aio_pika import connect_robust
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from app.config import settings
 from app.rabbitmq_consumer import start_consumer
@@ -84,6 +85,12 @@ async def check_services() -> None:
     except Exception as e:
         logger.error(f"Failed to connect to RabbitMQ: {e}")
         raise
+
+
+@app.get("/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")
