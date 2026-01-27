@@ -522,6 +522,13 @@ SUBSCRIPTION_EVENT_TYPES = {
 
 NOTIFICATION_EVENT_TYPES = REMINDER_EVENT_TYPES | SUBSCRIPTION_EVENT_TYPES
 
+# Known actions for metric label sanitization (prevents cardinality explosion)
+_KNOWN_RABBITMQ_ACTIONS = {
+    "update_block", "update_blocks", "update_access",
+    "subscribe", "unsubscribe", "sandbox_mode_changed",
+    "chat_event", "access_request",
+} | NOTIFICATION_EVENT_TYPES
+
 
 # =============================================================================
 # Chat Event Handler (from backend with action: 'chat_event')
@@ -759,7 +766,8 @@ async def handle_message(message: IncomingMessage) -> None:
 
     action = message_data.get('action')
     event_type = message_data.get('type')
-    metric_label = action or event_type or "unknown"
+    raw_label = action or event_type or "unknown"
+    metric_label = raw_label if raw_label in _KNOWN_RABBITMQ_ACTIONS else "unknown"
 
     start_time = time.monotonic()
     try:
@@ -788,7 +796,6 @@ async def handle_message(message: IncomingMessage) -> None:
         else:
             logger.warning(f"Unknown message received: action={action}, type={event_type}")
 
-        rabbitmq_messages_total.labels(action=metric_label).inc()
         await message.ack()
     except Exception:
         rabbitmq_message_errors_total.labels(action=metric_label).inc()
@@ -796,6 +803,7 @@ async def handle_message(message: IncomingMessage) -> None:
         await message.reject(requeue=False)
     finally:
         duration = time.monotonic() - start_time
+        rabbitmq_messages_total.labels(action=metric_label).inc()
         rabbitmq_message_duration_seconds.labels(action=metric_label).observe(duration)
 
 
