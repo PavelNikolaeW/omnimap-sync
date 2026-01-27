@@ -4,6 +4,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -30,6 +31,12 @@ from app.models import (
     ChatEventResponse,
     AccessRequestMessage,
     AccessRequestResponse,
+)
+from app.metrics import (
+    rabbitmq_messages_total,
+    rabbitmq_message_errors_total,
+    rabbitmq_message_duration_seconds,
+    rabbitmq_reconnects_total,
 )
 from app.redis_client import get_redis_pool
 from app.utils import prepare_block_data_for_redis, parse_redis_block_data
@@ -752,7 +759,9 @@ async def handle_message(message: IncomingMessage) -> None:
 
     action = message_data.get('action')
     event_type = message_data.get('type')
+    metric_label = action or event_type or "unknown"
 
+    start_time = time.monotonic()
     try:
         # Handle action-based messages
         if action == 'update_block':
@@ -779,10 +788,15 @@ async def handle_message(message: IncomingMessage) -> None:
         else:
             logger.warning(f"Unknown message received: action={action}, type={event_type}")
 
+        rabbitmq_messages_total.labels(action=metric_label).inc()
         await message.ack()
     except Exception:
+        rabbitmq_message_errors_total.labels(action=metric_label).inc()
         logger.exception(f"Failed to process message with action '{action}'")
         await message.reject(requeue=False)
+    finally:
+        duration = time.monotonic() - start_time
+        rabbitmq_message_duration_seconds.labels(action=metric_label).observe(duration)
 
 
 def _get_exchange_type(type_str: str) -> ExchangeType:
@@ -853,8 +867,10 @@ async def start_consumer() -> None:
                 await connection.close()
             break
         except exceptions.AMQPConnectionError as e:
+            rabbitmq_reconnects_total.inc()
             logger.error(f"Lost connection to RabbitMQ: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
         except Exception as e:
+            rabbitmq_reconnects_total.inc()
             logger.exception(f"Unexpected error in consumer loop: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
