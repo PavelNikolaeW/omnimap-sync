@@ -108,6 +108,7 @@ class BlockUpdatesResponse(BaseModel):
     """Response with list of block updates."""
     type: Literal["block_updates"] = "block_updates"
     updates: list[dict[str, Any]]
+    new_block_ids: list[str] = []  # IDs блоков которых нет у клиента
 
 
 class BlockUpdateAccessResponse(BaseModel):

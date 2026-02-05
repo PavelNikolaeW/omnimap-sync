@@ -213,11 +213,19 @@ async def handle_get_updates(
     for block_id in unsubscribed_blocks:
         updated_blocks_data.append({"id": block_id, "deleted": True})
 
+    # Determine new blocks: subscribed but not in client's request
+    client_block_ids = set(valid_blocks_dict.keys()) | set(unsubscribed_blocks)
+    new_block_ids = list(subscribed_blocks - client_block_ids)
+
     # Send response
-    response = BlockUpdatesResponse(updates=updated_blocks_data)
+    response = BlockUpdatesResponse(
+        updates=updated_blocks_data,
+        new_block_ids=new_block_ids
+    )
     await websocket.send_json(response.model_dump())
 
     logger.info(
-        f"Sent block updates to {connection_id}: {len(updated_blocks_data)} total blocks "
+        f"Sent block updates to {connection_id}: {len(updated_blocks_data)} updated blocks, "
+        f"{len(new_block_ids)} new blocks, "
         f"({len(valid_blocks_dict)} subscribed, {len(unsubscribed_blocks)} deleted)"
     )
