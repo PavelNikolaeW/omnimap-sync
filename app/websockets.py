@@ -217,15 +217,31 @@ async def handle_get_updates(
     client_block_ids = set(valid_blocks_dict.keys()) | set(unsubscribed_blocks)
     new_block_ids = list(subscribed_blocks - client_block_ids)
 
+    # Load full data for new blocks from Redis
+    new_blocks_data: list[dict[str, Any]] = []
+    if new_block_ids:
+        async with redis.pipeline(transaction=False) as pipe:
+            for block_id in new_block_ids:
+                pipe.hgetall(f"blockdata:{block_id}")
+            new_blocks_redis = await pipe.execute()
+
+        for block_id, redis_data in zip(new_block_ids, new_blocks_redis):
+            if redis_data:
+                try:
+                    parsed_data = parse_redis_block_data(redis_data)
+                    new_blocks_data.append(parsed_data)
+                except Exception as e:
+                    logger.exception(f"Error parsing new block {block_id}: {e}")
+
     # Send response
     response = BlockUpdatesResponse(
         updates=updated_blocks_data,
-        new_block_ids=new_block_ids
+        new_blocks=new_blocks_data
     )
     await websocket.send_json(response.model_dump())
 
     logger.info(
         f"Sent block updates to {connection_id}: {len(updated_blocks_data)} updated blocks, "
-        f"{len(new_block_ids)} new blocks, "
+        f"{len(new_blocks_data)} new blocks, "
         f"({len(valid_blocks_dict)} subscribed, {len(unsubscribed_blocks)} deleted)"
     )
