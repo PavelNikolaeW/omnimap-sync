@@ -421,6 +421,46 @@ class TestHandleGetUpdates:
         response = mock_ws.send_json.call_args[0][0]
         assert len(response["updates"]) == 1
 
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_new_blocks_updated_at_is_int(self, mock_ws, mock_redis):
+        """Test that new_blocks also return updated_at as int."""
+        # User subscribed to block-1 and block-2, but client only sends block-1
+        mock_redis.smembers = AsyncMock(return_value={"block-1", "block-2"})
+
+        call_count = 0
+
+        def make_pipeline(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            pipe = AsyncMock()
+            pipe.hgetall = MagicMock()
+            pipe.__aenter__ = AsyncMock(return_value=pipe)
+            pipe.__aexit__ = AsyncMock(return_value=None)
+            if call_count == 1:
+                # First pipeline: updated blocks check
+                pipe.execute = AsyncMock(return_value=[
+                    {"id": "block-1", "updated_at": "500", "title": "Old"}
+                ])
+            else:
+                # Second pipeline: new blocks data
+                pipe.execute = AsyncMock(return_value=[
+                    {"id": "block-2", "updated_at": "3000", "title": "New Block"}
+                ])
+            return pipe
+
+        mock_redis.pipeline = MagicMock(side_effect=make_pipeline)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 1000}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["new_blocks"]) == 1
+        new_block = response["new_blocks"][0]
+        assert isinstance(new_block["updated_at"], int)
+        assert new_block["updated_at"] == 3000
+
 
 class TestJWTVerificationFixed:
     """Tests verifying that JWT verification works correctly after fix."""

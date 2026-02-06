@@ -213,7 +213,7 @@ async def handle_get_updates(
                         try:
                             parsed_data["updated_at"] = int(parsed_data["updated_at"])
                         except (ValueError, TypeError):
-                            pass
+                            parsed_data["updated_at"] = 0
                     updated_blocks_data.append(parsed_data)
                     logger.debug(
                         f"Block {block_id} has update: redis_time={redis_time}, client_time={client_time}"
@@ -253,7 +253,7 @@ async def handle_get_updates(
                         try:
                             parsed_data["updated_at"] = int(parsed_data["updated_at"])
                         except (ValueError, TypeError):
-                            pass
+                            parsed_data["updated_at"] = 0
                     new_blocks_data.append(parsed_data)
                 except Exception as e:
                     logger.exception(f"Error parsing new block {block_id}: {e}")
