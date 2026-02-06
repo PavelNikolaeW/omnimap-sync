@@ -336,6 +336,131 @@ class TestHandleGetUpdates:
         assert response["type"] == "block_updates"
         assert response["updates"] == []
 
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_string_updated_at_from_client(self, mock_ws, mock_redis):
+        """Test that string updated_at from client is handled correctly (round-trip scenario)."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "2000", "title": "Updated"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": "1000"}  # String from previous response
+            ])
+
+        mock_ws.send_json.assert_called_once()
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates"
+        assert len(response["updates"]) == 1
+        assert response["updates"][0]["id"] == "block-1"
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_response_updated_at_is_int(self, mock_ws, mock_redis):
+        """Test that updated_at in response is an integer, not a string."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "2000", "title": "Test"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 0}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        updated_block = response["updates"][0]
+        assert isinstance(updated_block["updated_at"], int)
+        assert updated_block["updated_at"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_none_updated_at_from_client(self, mock_ws, mock_redis):
+        """Test that None updated_at from client defaults to 0."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1000", "title": "Test"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": None}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["updates"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_missing_updated_at_defaults_to_zero(self, mock_ws, mock_redis):
+        """Test that missing updated_at defaults to 0 and block is returned."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1000", "title": "Test"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1"}  # No updated_at key
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["updates"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_new_blocks_updated_at_is_int(self, mock_ws, mock_redis):
+        """Test that new_blocks also return updated_at as int."""
+        # User subscribed to block-1 and block-2, but client only sends block-1
+        mock_redis.smembers = AsyncMock(return_value={"block-1", "block-2"})
+
+        call_count = 0
+
+        def make_pipeline(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            pipe = AsyncMock()
+            pipe.hgetall = MagicMock()
+            pipe.__aenter__ = AsyncMock(return_value=pipe)
+            pipe.__aexit__ = AsyncMock(return_value=None)
+            if call_count == 1:
+                # First pipeline: updated blocks check
+                pipe.execute = AsyncMock(return_value=[
+                    {"id": "block-1", "updated_at": "500", "title": "Old"}
+                ])
+            else:
+                # Second pipeline: new blocks data
+                pipe.execute = AsyncMock(return_value=[
+                    {"id": "block-2", "updated_at": "3000", "title": "New Block"}
+                ])
+            return pipe
+
+        mock_redis.pipeline = MagicMock(side_effect=make_pipeline)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 1000}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["new_blocks"]) == 1
+        new_block = response["new_blocks"][0]
+        assert isinstance(new_block["updated_at"], int)
+        assert new_block["updated_at"] == 3000
+
 
 class TestJWTVerificationFixed:
     """Tests verifying that JWT verification works correctly after fix."""
