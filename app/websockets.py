@@ -183,7 +183,7 @@ async def handle_get_updates(
     valid_block_ids = list(valid_blocks_dict.keys())
     total_ids = len(valid_block_ids)
 
-    logger.debug(
+    logger.info(
         f"User {connection_id} is requesting updates for {total_ids} subscribed blocks. "
         f"Using chunk size = {block_portion}"
     )
@@ -207,7 +207,13 @@ async def handle_get_updates(
             try:
                 redis_time = int(redis_data.get("updated_at", 0))
                 client_time = valid_blocks_dict[block_id]
-                if redis_time > client_time:
+
+                # Компенсируем safety margin клиента: клиент отправляет (timestamp - 1)
+                # чтобы не пропустить апдейты в ту же секунду. Проверяем разницу > 1.
+                # Если разница ровно 1, значит блок не изменился (safety margin).
+                time_diff = redis_time - client_time
+
+                if time_diff > 1:
                     parsed_data = parse_redis_block_data(redis_data)
                     if "updated_at" in parsed_data:
                         try:
@@ -216,11 +222,11 @@ async def handle_get_updates(
                             parsed_data["updated_at"] = 0
                     updated_blocks_data.append(parsed_data)
                     logger.debug(
-                        f"Block {block_id} has update: redis_time={redis_time}, client_time={client_time}"
+                        f"Block {block_id} has update: redis_time={redis_time}, client_time={client_time}, diff={time_diff}"
                     )
                 else:
                     logger.debug(
-                        f"Block {block_id} is up to date: redis_time={redis_time}, client_time={client_time}"
+                        f"Block {block_id} is up to date: redis_time={redis_time}, client_time={client_time}, diff={time_diff}"
                     )
             except (ValueError, TypeError) as e:
                 logger.warning(
