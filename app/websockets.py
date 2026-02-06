@@ -164,7 +164,11 @@ async def handle_get_updates(
     for block in blocks:
         block_id = block.get('id')
         if block_id in subscribed_blocks:
-            valid_blocks_dict[block_id] = block.get('updated_at', 0)
+            raw_updated_at = block.get('updated_at', 0)
+            try:
+                valid_blocks_dict[block_id] = int(raw_updated_at)
+            except (ValueError, TypeError):
+                valid_blocks_dict[block_id] = 0
         elif block_id:
             unsubscribed_blocks.append(block_id)
 
@@ -205,9 +209,25 @@ async def handle_get_updates(
                 client_time = valid_blocks_dict[block_id]
                 if redis_time > client_time:
                     parsed_data = parse_redis_block_data(redis_data)
+                    if "updated_at" in parsed_data:
+                        try:
+                            parsed_data["updated_at"] = int(parsed_data["updated_at"])
+                        except (ValueError, TypeError):
+                            pass
                     updated_blocks_data.append(parsed_data)
-            except ValueError as e:
-                logger.exception(f"Error parsing updated_at for block {block_id}: {e}")
+                    logger.debug(
+                        f"Block {block_id} has update: redis_time={redis_time}, client_time={client_time}"
+                    )
+                else:
+                    logger.debug(
+                        f"Block {block_id} is up to date: redis_time={redis_time}, client_time={client_time}"
+                    )
+            except (ValueError, TypeError) as e:
+                logger.warning(
+                    f"Error comparing updated_at for block {block_id}: {e}. "
+                    f"redis_data.updated_at={redis_data.get('updated_at')!r}, "
+                    f"client_time={valid_blocks_dict.get(block_id)!r}"
+                )
 
     # Mark unsubscribed blocks as deleted
     for block_id in unsubscribed_blocks:
@@ -229,6 +249,11 @@ async def handle_get_updates(
             if redis_data:
                 try:
                     parsed_data = parse_redis_block_data(redis_data)
+                    if "updated_at" in parsed_data:
+                        try:
+                            parsed_data["updated_at"] = int(parsed_data["updated_at"])
+                        except (ValueError, TypeError):
+                            pass
                     new_blocks_data.append(parsed_data)
                 except Exception as e:
                     logger.exception(f"Error parsing new block {block_id}: {e}")
