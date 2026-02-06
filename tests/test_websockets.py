@@ -300,6 +300,52 @@ class TestHandleGetUpdates:
         assert response["updates"][0]["id"] == "block-1"
 
     @pytest.mark.asyncio
+    async def test_handle_get_updates_skips_safety_margin_blocks(self, mock_ws, mock_redis):
+        """Test that blocks with diff=1 (safety margin) are not returned."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        # Redis updated_at=1000, client sends 999 (=1000-1 safety margin) → diff=1 → skip
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1000", "title": "Same"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 999}
+            ])
+
+        mock_ws.send_json.assert_called_once()
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates"
+        assert len([u for u in response["updates"] if not u.get("deleted")]) == 0
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_returns_block_with_real_change(self, mock_ws, mock_redis):
+        """Test that blocks with diff>1 (real change) are returned."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        # Redis updated_at=1002, client sends 999 (=1000-1) → diff=3 → return
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1002", "title": "Changed"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 999}
+            ])
+
+        mock_ws.send_json.assert_called_once()
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["updates"]) == 1
+        assert response["updates"][0]["id"] == "block-1"
+
+    @pytest.mark.asyncio
     async def test_handle_get_updates_skips_older_blocks(self, mock_ws, mock_redis):
         """Test that blocks older than client's version are skipped."""
         mock_redis.smembers = AsyncMock(return_value={"block-1"})
