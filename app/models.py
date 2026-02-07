@@ -75,6 +75,14 @@ class GetUpdatesRequest(BaseModel):
     blocks: list[BlockUpdateRequest] = Field(default_factory=list)
 
 
+class GetUpdatesV2Request(BaseModel):
+    """Cursor-based request for getting block updates."""
+    action: Literal["get_updates_v2"]
+    cursor: int = 0
+    subscription_version: int = 0
+    limit: int = 2000
+
+
 class WebSocketRequest(BaseModel):
     """Generic WebSocket request with action."""
     action: str
@@ -109,6 +117,17 @@ class BlockUpdatesResponse(BaseModel):
     type: Literal["block_updates"] = "block_updates"
     updates: list[dict[str, Any]]
     new_blocks: list[dict[str, Any]] = []  # Полные данные новых блоков
+
+
+class BlockUpdatesV2Response(BaseModel):
+    """Cursor-based response with incremental block updates."""
+    type: Literal["block_updates_v2"] = "block_updates_v2"
+    updates: list[dict[str, Any]]
+    next_cursor: int = 0
+    has_more: bool = False
+    subscription_version: int = 0
+    full_resync_required: bool = False
+    reason: str | None = None
 
 
 class BlockUpdateAccessResponse(BaseModel):

@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # Performance tuning
     block_portion: int = 500  # Chunk size for Redis pipeline operations
     MAX_CONCURRENT_SENDS: int = 10  # Semaphore limit for anonymous user
+    SYNC_V2_ENABLED: bool = False
+    GET_UPDATES_V2_DEFAULT_LIMIT: int = 2000
+    GET_UPDATES_V2_MAX_LIMIT: int = 10000
+    CHANGELOG_SEQ_KEY: str = "sync:seq"
+    CHANGELOG_KEY: str = "sync:changelog"
+    CHANGELOG_MAX_LEN: int = 200000
+    SUBSCRIPTION_VERSION_KEY_PREFIX: str = "sync:subver:"
 
     # Online status tracking
     ONLINE_STATUS_TTL: int = 300  # TTL in seconds for user online status (5 minutes)

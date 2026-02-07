@@ -45,6 +45,71 @@ from app.websockets import connection_manager
 logger = logging.getLogger("realtime_service")
 
 
+def _subscription_version_key(user_id: str) -> str:
+    return f"{settings.SUBSCRIPTION_VERSION_KEY_PREFIX}{user_id}"
+
+
+def _changelog_member(seq: int, op: str, block_id: str) -> str:
+    return f"{seq}:{op}:{block_id}"
+
+
+async def append_changelog_events(
+    redis: Redis,
+    events: list[tuple[str, str]],
+) -> None:
+    """
+    Append block events to Redis changelog for cursor-based sync.
+
+    events format: [(block_id, op)], where op is "upsert" or "delete".
+    """
+    if not settings.SYNC_V2_ENABLED or not events:
+        return
+
+    try:
+        total_events = len(events)
+        seq_end = await redis.incrby(settings.CHANGELOG_SEQ_KEY, total_events)
+        seq_start = seq_end - total_events + 1
+
+        async with redis.pipeline(transaction=True) as pipe:
+            for idx, (block_id, op) in enumerate(events):
+                seq = seq_start + idx
+                pipe.zadd(
+                    settings.CHANGELOG_KEY,
+                    {_changelog_member(seq, op, block_id): seq}
+                )
+
+            # Keep only latest N entries to bound Redis memory usage.
+            if settings.CHANGELOG_MAX_LEN > 0:
+                pipe.zremrangebyrank(
+                    settings.CHANGELOG_KEY,
+                    0,
+                    -(settings.CHANGELOG_MAX_LEN + 1)
+                )
+            await pipe.execute()
+    except Exception:
+        logger.exception("Failed to append events to changelog")
+
+
+async def bump_subscription_versions(redis: Redis, user_ids: list[str] | set[str]) -> None:
+    """
+    Increment per-user subscription version to force safe resync on ACL changes.
+    """
+    if not settings.SYNC_V2_ENABLED or not user_ids:
+        return
+
+    unique_user_ids = {str(uid) for uid in user_ids if uid is not None}
+    if not unique_user_ids:
+        return
+
+    try:
+        async with redis.pipeline(transaction=True) as pipe:
+            for user_id in unique_user_ids:
+                pipe.incr(_subscription_version_key(user_id))
+            await pipe.execute()
+    except Exception:
+        logger.exception("Failed to bump subscription version")
+
+
 async def action_update_block(message_data: dict[str, Any]) -> None:
     """
     Process a single block update.
@@ -67,6 +132,7 @@ async def action_update_block(message_data: dict[str, Any]) -> None:
     try:
         prepared_data = prepare_block_data_for_redis(msg.block_data)
         await redis.hset(key_data, mapping=prepared_data)
+        await append_changelog_events(redis, [(msg.block_uuid, "upsert")])
     except Exception:
         logger.exception(f"Failed to save block data for block_uuid={msg.block_uuid}")
         return
@@ -150,6 +216,7 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
 
     # Step 1: Save block data using pipeline
     try:
+        saved_block_ids: list[str] = []
         pipe = redis.pipeline(transaction=True)
         for block_uuid, block_data in msg.blocks.items():
             if not isinstance(block_data, dict):
@@ -157,7 +224,9 @@ async def action_update_blocks(message_data: dict[str, Any]) -> None:
                 continue
             prepared_data = prepare_block_data_for_redis(block_data)
             pipe.hset(f"blockdata:{block_uuid}", mapping=prepared_data)
+            saved_block_ids.append(block_uuid)
         await pipe.execute()
+        await append_changelog_events(redis, [(block_uuid, "upsert") for block_uuid in saved_block_ids])
     except Exception:
         logger.exception("Failed to save block data for batch update")
         return
@@ -352,6 +421,8 @@ async def action_update_access(message_data: dict[str, Any]) -> None:
                     logger.info(f"User {user_id} access '{msg.permission}' set for {len(chunk)} blocks.")
                 await pipe.execute()
 
+        await bump_subscription_versions(redis, [user_id])
+
         await send_message_update_access(
             msg.start_block_ids,
             block_uuids,
@@ -391,6 +462,7 @@ async def action_subscribe(message_data: dict[str, Any]) -> None:
                     pipe.sadd(f"subscriber:{user_id}:blocks", block_uuid)
                 await pipe.execute()
 
+        await bump_subscription_versions(redis, [user_id])
         logger.info(f"User {user_id} subscribed to {len(msg.block_uuids)} blocks successfully.")
     except Exception:
         logger.exception("Failed to subscribe user to blocks in Redis")
@@ -452,6 +524,8 @@ async def action_unsubscribe(message_data: dict[str, Any]) -> None:
             pipe.delete(*[f"sandbox:{uuid}" for uuid in chunk])
 
             await pipe.execute()
+            await append_changelog_events(redis, [(block_uuid, "delete") for block_uuid in chunk])
+            await bump_subscription_versions(redis, all_subscribers)
 
         logger.info(f"Successfully unsubscribed and cleaned up {len(msg.block_uuids)} blocks")
     except Exception:

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import jwt
 from fastapi import WebSocketDisconnect
 
-from app.websockets import websocket_endpoint, handle_get_updates, connection_manager
+from app.websockets import websocket_endpoint, handle_get_updates, handle_get_updates_v2, connection_manager
 from app.config import settings
 
 
@@ -557,3 +557,98 @@ class TestJWTVerificationFixed:
         # Fixed: User is NOT connected with wrong signature
         mock_connect.assert_not_called()
         mock_ws.close.assert_called_once_with(code=1008)
+
+
+class TestHandleGetUpdatesV2:
+    """Tests for handle_get_updates_v2 function."""
+
+    @pytest.fixture
+    def mock_ws(self):
+        ws = AsyncMock()
+        ws.send_json = AsyncMock()
+        return ws
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_v2_subscription_version_mismatch(self, mock_ws):
+        mock_redis = AsyncMock()
+        # First get(): subscription version, second get(): current seq
+        mock_redis.get = AsyncMock(side_effect=["5", "123"])
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates_v2(
+                websocket=mock_ws,
+                connection_id="user_1",
+                cursor=100,
+                subscription_version=4,
+                limit=1000,
+            )
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates_v2"
+        assert response["full_resync_required"] is True
+        assert response["reason"] == "subscription_version_mismatch"
+        assert response["next_cursor"] == 123
+        assert response["subscription_version"] == 5
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_v2_stale_cursor(self, mock_ws):
+        mock_redis = AsyncMock()
+        # First get(): subscription version, second get(): current seq
+        mock_redis.get = AsyncMock(side_effect=["1", "250"])
+        # Min retained seq in changelog is 120 -> cursor=10 is stale
+        mock_redis.zrange = AsyncMock(return_value=[("120:upsert:block-1", 120.0)])
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates_v2(
+                websocket=mock_ws,
+                connection_id="user_1",
+                cursor=10,
+                subscription_version=1,
+                limit=1000,
+            )
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates_v2"
+        assert response["full_resync_required"] is True
+        assert response["reason"] == "stale_cursor"
+        assert response["next_cursor"] == 250
+
+    @pytest.mark.asyncio
+    async def test_handle_get_updates_v2_returns_subscribed_updates(self, mock_ws):
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value="2")  # subscription version
+        mock_redis.zrange = AsyncMock(return_value=[("100:upsert:block-1", 100.0)])
+        mock_redis.zrangebyscore = AsyncMock(return_value=[("100:upsert:block-1", 100.0)])
+        mock_redis.zcount = AsyncMock(return_value=0)
+
+        pipe_1 = AsyncMock()
+        pipe_1.sismember = MagicMock()
+        pipe_1.execute = AsyncMock(return_value=[True])
+        pipe_1.__aenter__ = AsyncMock(return_value=pipe_1)
+        pipe_1.__aexit__ = AsyncMock(return_value=None)
+
+        pipe_2 = AsyncMock()
+        pipe_2.hgetall = MagicMock()
+        pipe_2.execute = AsyncMock(return_value=[{"id": "block-1", "title": "A", "updated_at": "2000"}])
+        pipe_2.__aenter__ = AsyncMock(return_value=pipe_2)
+        pipe_2.__aexit__ = AsyncMock(return_value=None)
+
+        mock_redis.pipeline = MagicMock(side_effect=[pipe_1, pipe_2])
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates_v2(
+                websocket=mock_ws,
+                connection_id="user_1",
+                cursor=99,
+                subscription_version=2,
+                limit=1000,
+            )
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates_v2"
+        assert response["full_resync_required"] is False
+        assert response["next_cursor"] == 100
+        assert response["has_more"] is False
+        assert response["subscription_version"] == 2
+        assert len(response["updates"]) == 1
+        assert response["updates"][0]["id"] == "block-1"

@@ -42,6 +42,45 @@ ws_messages_received_total = Counter(
     ["action"],
 )
 
+ws_get_updates_requests_total = Counter(
+    "ws_get_updates_requests_total",
+    "Total get_updates/get_updates_v2 requests by version and result",
+    ["version", "result"],
+)
+
+ws_get_updates_requested_blocks = Histogram(
+    "ws_get_updates_requested_blocks",
+    "Number of blocks requested by client in get_updates requests",
+    ["version"],
+    buckets=(0, 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, float("inf")),
+)
+
+ws_get_updates_response_updates = Histogram(
+    "ws_get_updates_response_updates",
+    "Number of updates returned in get_updates responses",
+    ["version"],
+    buckets=(0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, float("inf")),
+)
+
+ws_get_updates_response_new_blocks = Histogram(
+    "ws_get_updates_response_new_blocks",
+    "Number of new_blocks returned in get_updates responses",
+    ["version"],
+    buckets=(0, 1, 5, 10, 25, 50, 100, 250, 500, 1000, float("inf")),
+)
+
+ws_get_updates_redis_ops_total = Counter(
+    "ws_get_updates_redis_ops_total",
+    "Redis operations executed while handling get_updates requests",
+    ["version", "op"],
+)
+
+ws_get_updates_duration_seconds = Histogram(
+    "ws_get_updates_duration_seconds",
+    "Duration of get_updates/get_updates_v2 handling",
+    ["version", "result"],
+)
+
 ws_send_errors_total = Counter(
     "ws_send_errors_total",
     "Total errors when sending messages to WebSocket clients",
