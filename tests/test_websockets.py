@@ -317,13 +317,13 @@ class TestHandleGetUpdates:
         assert response["updates"][0]["id"] == "block-1"
 
     @pytest.mark.asyncio
-    async def test_handle_get_updates_skips_safety_margin_blocks(self, mock_ws, mock_redis):
-        """Test that blocks with diff=1 (safety margin) are not returned."""
+    async def test_handle_get_updates_skips_equal_timestamp_blocks(self, mock_ws, mock_redis):
+        """Test that blocks with equal timestamps are not returned."""
         mock_redis.smembers = AsyncMock(return_value={"block-1"})
 
         pipe = AsyncMock()
         pipe.hgetall = MagicMock()
-        # Redis updated_at=1000, client sends 999 (=1000-1 safety margin) → diff=1 → skip
+        # Redis updated_at=1000, client sends 1000 -> equal timestamps -> skip
         pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1000", "title": "Same"}])
         pipe.__aenter__ = AsyncMock(return_value=pipe)
         pipe.__aexit__ = AsyncMock(return_value=None)
@@ -331,7 +331,7 @@ class TestHandleGetUpdates:
 
         with patch("app.websockets.get_redis_pool", return_value=mock_redis):
             await handle_get_updates(mock_ws, "user_123", [
-                {"id": "block-1", "updated_at": 999}
+                {"id": "block-1", "updated_at": 1000}
             ])
 
         mock_ws.send_json.assert_called_once()
@@ -340,21 +340,21 @@ class TestHandleGetUpdates:
         assert len([u for u in response["updates"] if not u.get("deleted")]) == 0
 
     @pytest.mark.asyncio
-    async def test_handle_get_updates_returns_block_with_real_change(self, mock_ws, mock_redis):
-        """Test that blocks with diff>1 (real change) are returned."""
+    async def test_handle_get_updates_returns_block_when_server_is_newer_by_one_second(self, mock_ws, mock_redis):
+        """Test that +1 second difference is treated as an update."""
         mock_redis.smembers = AsyncMock(return_value={"block-1"})
 
         pipe = AsyncMock()
         pipe.hgetall = MagicMock()
-        # Redis updated_at=1002, client sends 999 (=1000-1) → diff=3 → return
-        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1002", "title": "Changed"}])
+        # Redis updated_at=1001, client sends 1000 -> server is newer -> return
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1001", "title": "Changed"}])
         pipe.__aenter__ = AsyncMock(return_value=pipe)
         pipe.__aexit__ = AsyncMock(return_value=None)
         mock_redis.pipeline = MagicMock(return_value=pipe)
 
         with patch("app.websockets.get_redis_pool", return_value=mock_redis):
             await handle_get_updates(mock_ws, "user_123", [
-                {"id": "block-1", "updated_at": 999}
+                {"id": "block-1", "updated_at": 1000}
             ])
 
         mock_ws.send_json.assert_called_once()

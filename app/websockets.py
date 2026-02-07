@@ -276,12 +276,10 @@ async def handle_get_updates(
                     redis_time = int(redis_data.get("updated_at", 0))
                     client_time = valid_blocks_dict[block_id]
 
-                    # Компенсируем safety margin клиента: клиент отправляет (timestamp - 1)
-                    # чтобы не пропустить апдейты в ту же секунду. Проверяем разницу > 1.
-                    # Если разница ровно 1, значит блок не изменился (safety margin).
+                    # Возвращаем блок только если серверная версия новее клиентской.
                     time_diff = redis_time - client_time
 
-                    if time_diff > 1:
+                    if redis_time > client_time:
                         parsed_data = parse_redis_block_data(redis_data)
                         if "updated_at" in parsed_data:
                             try:
