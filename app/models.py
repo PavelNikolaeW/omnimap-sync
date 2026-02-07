@@ -117,6 +117,8 @@ class BlockUpdatesResponse(BaseModel):
     type: Literal["block_updates"] = "block_updates"
     updates: list[dict[str, Any]]
     new_blocks: list[dict[str, Any]] = []  # Полные данные новых блоков
+    full_resync_required: bool = False
+    reason: str | None = None
 
 
 class BlockUpdatesV2Response(BaseModel):

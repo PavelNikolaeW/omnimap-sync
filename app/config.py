@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     CHANGELOG_KEY: str = "sync:changelog"
     CHANGELOG_MAX_LEN: int = 200000
     SUBSCRIPTION_VERSION_KEY_PREFIX: str = "sync:subver:"
+    WS_IDLE_TIMEOUT_SECONDS: int = 90
 
     # Online status tracking
     ONLINE_STATUS_TTL: int = 300  # TTL in seconds for user online status (5 minutes)

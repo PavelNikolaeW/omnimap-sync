@@ -1,6 +1,7 @@
 # app/websockets.py
 """WebSocket endpoint for real-time block updates."""
 
+import asyncio
 import json
 import logging
 import time
@@ -95,7 +96,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         while True:
             message: str | None = None
             try:
-                message = await websocket.receive_text()
+                message = await asyncio.wait_for(
+                    websocket.receive_text(),
+                    timeout=settings.WS_IDLE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.info(
+                    "Connection %s idle timeout (%ss), closing socket",
+                    connection_id,
+                    settings.WS_IDLE_TIMEOUT_SECONDS,
+                )
+                await websocket.close(code=1001, reason="idle_timeout")
+                break
             except WebSocketDisconnect:
                 logger.info(f"Connection {connection_id} disconnected (WebSocketDisconnect)")
                 break
@@ -198,7 +210,11 @@ async def handle_get_updates(
 
         if not subscribed_blocks:
             result = "no_subscriptions"
-            response = BlockUpdatesResponse(updates=[])
+            response = BlockUpdatesResponse(
+                updates=[],
+                full_resync_required=True,
+                reason="no_subscriptions",
+            )
             await websocket.send_json(response.model_dump())
             logger.info(f"No subscribed blocks found for user {connection_id}")
             return
@@ -220,7 +236,11 @@ async def handle_get_updates(
 
         if not valid_blocks_dict:
             result = "no_valid_blocks"
-            response = BlockUpdatesResponse(updates=[])
+            response = BlockUpdatesResponse(
+                updates=[],
+                full_resync_required=True,
+                reason="no_valid_blocks",
+            )
             await websocket.send_json(response.model_dump())
             logger.info(f"User {connection_id} requested updates for blocks not subscribed.")
             return
@@ -404,6 +424,25 @@ async def handle_get_updates_v2(
             await websocket.send_json(response.model_dump())
             return
 
+        subscriber_key = f"subscriber:{connection_id}:blocks"
+        ws_get_updates_redis_ops_total.labels(version=version, op="scard").inc()
+        subscribed_count = await redis.scard(subscriber_key)
+        if subscribed_count == 0:
+            result = "no_subscriptions"
+            ws_get_updates_redis_ops_total.labels(version=version, op="get").inc()
+            seq_raw = await redis.get(settings.CHANGELOG_SEQ_KEY)
+            next_cursor = int(seq_raw or 0)
+            response = BlockUpdatesV2Response(
+                updates=[],
+                next_cursor=next_cursor,
+                has_more=False,
+                subscription_version=server_subscription_version,
+                full_resync_required=True,
+                reason="no_subscriptions",
+            )
+            await websocket.send_json(response.model_dump())
+            return
+
         # Validate cursor against changelog retention
         ws_get_updates_redis_ops_total.labels(version=version, op="zrange").inc()
         min_entry = await redis.zrange(settings.CHANGELOG_KEY, 0, 0, withscores=True)
@@ -473,7 +512,6 @@ async def handle_get_updates_v2(
             return
 
         # Keep only currently subscribed blocks
-        subscriber_key = f"subscriber:{connection_id}:blocks"
         block_ids = list(latest_by_block.keys())
         ws_get_updates_redis_ops_total.labels(version=version, op="sismember").inc(len(block_ids))
         async with redis.pipeline(transaction=False) as pipe:

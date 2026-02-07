@@ -1,5 +1,6 @@
 """Tests for app/websockets.py module."""
 
+import asyncio
 import pytest
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -204,6 +205,20 @@ class TestWebsocketEndpoint:
 
         mock_disconnect.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_websocket_endpoint_idle_timeout_closes_connection(self, mock_ws, valid_token):
+        """Test that idle connections are closed and disconnected from manager."""
+        mock_ws.query_params = {"token": valid_token}
+
+        with patch("app.websockets.verify_jwt", return_value=True):
+            with patch.object(connection_manager, "connect", new_callable=AsyncMock):
+                with patch.object(connection_manager, "disconnect", new_callable=AsyncMock) as mock_disconnect:
+                    with patch("app.websockets.asyncio.wait_for", new_callable=AsyncMock, side_effect=asyncio.TimeoutError):
+                        await websocket_endpoint(mock_ws)
+
+        mock_ws.close.assert_called_once_with(code=1001, reason="idle_timeout")
+        mock_disconnect.assert_called_once()
+
 
 class TestHandleGetUpdates:
     """Tests for handle_get_updates function."""
@@ -254,6 +269,8 @@ class TestHandleGetUpdates:
         response = mock_ws.send_json.call_args[0][0]
         assert response["type"] == "block_updates"
         assert response["updates"] == []
+        assert response["full_resync_required"] is True
+        assert response["reason"] == "no_subscriptions"
 
     @pytest.mark.asyncio
     async def test_handle_get_updates_filters_unsubscribed_blocks(self, mock_ws, mock_redis):
@@ -591,10 +608,34 @@ class TestHandleGetUpdatesV2:
         assert response["subscription_version"] == 5
 
     @pytest.mark.asyncio
+    async def test_handle_get_updates_v2_no_subscriptions(self, mock_ws):
+        mock_redis = AsyncMock()
+        # First get(): subscription version, second get(): current seq
+        mock_redis.get = AsyncMock(side_effect=["2", "150"])
+        mock_redis.scard = AsyncMock(return_value=0)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates_v2(
+                websocket=mock_ws,
+                connection_id="user_1",
+                cursor=100,
+                subscription_version=2,
+                limit=1000,
+            )
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates_v2"
+        assert response["full_resync_required"] is True
+        assert response["reason"] == "no_subscriptions"
+        assert response["next_cursor"] == 150
+        assert response["subscription_version"] == 2
+
+    @pytest.mark.asyncio
     async def test_handle_get_updates_v2_stale_cursor(self, mock_ws):
         mock_redis = AsyncMock()
         # First get(): subscription version, second get(): current seq
         mock_redis.get = AsyncMock(side_effect=["1", "250"])
+        mock_redis.scard = AsyncMock(return_value=1)
         # Min retained seq in changelog is 120 -> cursor=10 is stale
         mock_redis.zrange = AsyncMock(return_value=[("120:upsert:block-1", 120.0)])
 
@@ -617,6 +658,7 @@ class TestHandleGetUpdatesV2:
     async def test_handle_get_updates_v2_returns_subscribed_updates(self, mock_ws):
         mock_redis = AsyncMock()
         mock_redis.get = AsyncMock(return_value="2")  # subscription version
+        mock_redis.scard = AsyncMock(return_value=1)
         mock_redis.zrange = AsyncMock(return_value=[("100:upsert:block-1", 100.0)])
         mock_redis.zrangebyscore = AsyncMock(return_value=[("100:upsert:block-1", 100.0)])
         mock_redis.zcount = AsyncMock(return_value=0)
