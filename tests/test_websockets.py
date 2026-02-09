@@ -525,6 +525,99 @@ class TestHandleGetUpdates:
         assert new_block["updated_at"] == 3000
 
 
+class TestHandleGetUpdatesFloatTimestamps:
+    """Tests for float timestamp handling in handle_get_updates."""
+
+    @pytest.fixture
+    def mock_ws(self):
+        ws = AsyncMock()
+        ws.send_json = AsyncMock()
+        return ws
+
+    @pytest.fixture
+    def mock_redis(self):
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(return_value=set())
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        pipe.execute = AsyncMock(return_value=[])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        redis.pipeline = MagicMock(return_value=pipe)
+        return redis
+
+    @pytest.mark.asyncio
+    async def test_client_sends_float_string_updated_at(self, mock_ws, mock_redis):
+        """Test that float string updated_at from client is parsed correctly."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        # Redis has updated_at=2000, client sends "1000.5" (float string)
+        # int(float("1000.5")) = 1000, diff = 2000-1000 = 1000 > 1 -> return block
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "2000", "title": "Updated"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": "1000.5"}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert response["type"] == "block_updates"
+        assert len(response["updates"]) == 1
+        assert response["updates"][0]["id"] == "block-1"
+
+    @pytest.mark.asyncio
+    async def test_redis_returns_float_string_updated_at(self, mock_ws, mock_redis):
+        """Test that float string updated_at from Redis is parsed and returned as int."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        # Redis stores "2000.7" as updated_at (float string)
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "2000.7", "title": "Float TS"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": 0}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        assert len(response["updates"]) == 1
+        block = response["updates"][0]
+        assert isinstance(block["updated_at"], int)
+        assert block["updated_at"] == 2000
+
+    @pytest.mark.asyncio
+    async def test_float_timestamp_comparison_works_correctly(self, mock_ws, mock_redis):
+        """Test that float timestamps don't break the comparison logic."""
+        mock_redis.smembers = AsyncMock(return_value={"block-1"})
+
+        pipe = AsyncMock()
+        pipe.hgetall = MagicMock()
+        # Redis "1000.9" -> int(float()) = 1000, client "1000.5" -> 1000
+        # diff = 1000-1000 = 0 -> skip (not newer)
+        pipe.execute = AsyncMock(return_value=[{"id": "block-1", "updated_at": "1000.9", "title": "Same"}])
+        pipe.__aenter__ = AsyncMock(return_value=pipe)
+        pipe.__aexit__ = AsyncMock(return_value=None)
+        mock_redis.pipeline = MagicMock(return_value=pipe)
+
+        with patch("app.websockets.get_redis_pool", return_value=mock_redis):
+            await handle_get_updates(mock_ws, "user_123", [
+                {"id": "block-1", "updated_at": "1000.5"}
+            ])
+
+        response = mock_ws.send_json.call_args[0][0]
+        # Both truncate to 1000, diff=0, should skip
+        assert len([u for u in response["updates"] if not u.get("deleted")]) == 0
+
+
 class TestJWTVerificationFixed:
     """Tests verifying that JWT verification works correctly after fix."""
 
