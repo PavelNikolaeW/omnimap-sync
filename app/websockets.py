@@ -228,7 +228,7 @@ async def handle_get_updates(
             if block_id in subscribed_blocks:
                 raw_updated_at = block.get('updated_at', 0)
                 try:
-                    valid_blocks_dict[block_id] = int(raw_updated_at)
+                    valid_blocks_dict[block_id] = int(float(raw_updated_at))
                 except (ValueError, TypeError):
                     valid_blocks_dict[block_id] = 0
             elif block_id:
@@ -273,7 +273,7 @@ async def handle_get_updates(
                     continue
 
                 try:
-                    redis_time = int(redis_data.get("updated_at", 0))
+                    redis_time = int(float(redis_data.get("updated_at", 0)))
                     client_time = valid_blocks_dict[block_id]
 
                     # Возвращаем блок только если серверная версия новее клиентской.
@@ -283,7 +283,7 @@ async def handle_get_updates(
                         parsed_data = parse_redis_block_data(redis_data)
                         if "updated_at" in parsed_data:
                             try:
-                                parsed_data["updated_at"] = int(parsed_data["updated_at"])
+                                parsed_data["updated_at"] = int(float(parsed_data["updated_at"]))
                             except (ValueError, TypeError):
                                 parsed_data["updated_at"] = 0
                         updated_blocks_data.append(parsed_data)
@@ -324,7 +324,7 @@ async def handle_get_updates(
                         parsed_data = parse_redis_block_data(redis_data)
                         if "updated_at" in parsed_data:
                             try:
-                                parsed_data["updated_at"] = int(parsed_data["updated_at"])
+                                parsed_data["updated_at"] = int(float(parsed_data["updated_at"]))
                             except (ValueError, TypeError):
                                 parsed_data["updated_at"] = 0
                         new_blocks_data.append(parsed_data)
@@ -546,7 +546,7 @@ async def handle_get_updates_v2(
                 parsed_data = parse_redis_block_data(redis_data)
                 if "updated_at" in parsed_data:
                     try:
-                        parsed_data["updated_at"] = int(parsed_data["updated_at"])
+                        parsed_data["updated_at"] = int(float(parsed_data["updated_at"]))
                     except (ValueError, TypeError):
                         parsed_data["updated_at"] = 0
                 updates.append(parsed_data)
